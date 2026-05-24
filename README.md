@@ -31,6 +31,87 @@ triloop browse examples/example_5band_wwv.h5
 
 For a full walk-through (including the optional PicoSDK install needed to run real hardware), see [`INSTALL.md`](INSTALL.md).
 
+## End-to-end workflow
+
+The toolchain has three stages: **capture → analyze → visualize**. Below is the standard recipe for each. All commands assume both packages are installed (see [`INSTALL.md`](INSTALL.md)) and you're at the repo root.
+
+### 1. Data collection
+
+Real hardware (PicoScope 5444D plugged in via USB-3, PicoSDK installed):
+
+```bash
+# One-shot 8-second capture of all five WWV bands at 15.625 MS/s,
+# 4 channels, auto-ranged.  Writes capture_<UTC-timestamp>.h5 in the
+# current working directory.
+picoacq capture
+
+# Specify output path, duration, channels explicitly:
+picoacq capture -o my_capture.h5 --duration 4 --channels A,B,C,D
+
+# Continuous unattended monitoring: 8 seconds out of every 10 minutes,
+# stored under data/ with prefix "wwv".  Stop with Ctrl-C.
+picoacq monitor -d data/ --interval 600 --duration 8 --prefix wwv
+```
+
+Without hardware, use the simulator — same file format, runs anywhere:
+
+```bash
+picoacq capture --simulate -o my_sim.h5 \
+    --sim-pol rcp --sim-faraday 30 --sim-snr 25
+```
+
+The capture file's `metadata` group records sample rate, the auto-range probe results, the chosen Pico voltage range per channel, and the list of expected RF bands (`rf_bands_hz`) so the analysis side can locate every band's baseband alias automatically. `triloop summary <file.h5>` prints a one-screen overview of any capture.
+
+### 2. Analysis
+
+Three subcommands cover the common cases:
+
+```bash
+# Multi-band: run the polarimetry pipeline on every RF band recorded
+# in the file (reads rf_bands_hz from capture_settings).  Writes a
+# 5x4 comparison PNG and a per-band JSON summary.
+triloop analyze-multi my_capture.h5 --az 9 --el 35
+
+# Single-band: target a specific carrier frequency.  Useful when you
+# only care about one tone or have a non-standard capture.
+triloop analyze my_capture.h5 --carrier 25000 --bw 2000 --az 273 --el 12
+
+# Direction finding: null-eigenvector + 2-D null sweep + parabolic
+# refinement to recover (az, el) from the data itself.  Optional
+# residual-map PNG.
+triloop locate my_capture.h5 --carrier 25000 --bw 2000 --az0 270 --el0 15 \
+    --out-png residual_map.png
+
+# Batch mode: run analyze on every .h5 in a directory in parallel,
+# producing one JSON line per file (loads cleanly into pandas).
+triloop batch data/ --carrier 25000 --bw 2000 --az 9 --el 35 --workers 4
+```
+
+Output JSON contains f_peak, per-loop SNR, median polarization fraction / ellipticity / position angle, intensity statistics, and the recovered direction (for `locate`).
+
+### 3. Visualization
+
+```bash
+# Static QC plot: full-Nyquist PSD with each RF band annotated at its
+# baseband alias position, per-band zoom panels (axis flipped for
+# inverted Nyquist zones), time-domain traces, and the auto-range
+# probe table.  Writes <file>_view.png.
+triloop view my_capture.h5
+
+# Self-contained interactive HTML browser (Plotly): tabbed layout
+# with full-Nyquist PSD, time series, and one tab per RF band
+# containing a PSD zoom, intensity time history, intensity CDF with
+# P10/P1 fade-depth markers, and an animated polarization ellipse
+# in the (Re A_p, Re A_q) plane with a frame slider.  Writes a
+# single .html file you can email or scp.
+triloop browse my_capture.h5
+
+# Jupyter notebook with the file path pre-loaded:
+triloop notebook my_capture.h5
+```
+
+The interactive browser is a single HTML file with no server dependency — every panel pans, zooms, and exposes hover-readouts; the polarization-ellipse animation has a Play button and frame slider so Faraday rotation and time-varying ellipticity become directly visible. A pre-rendered version of the bundled example is at [`examples/example_5band_wwv_browse.html`](examples/example_5band_wwv_browse.html); to view it interactively, either clone the repo and open the file locally, or visit the GitHub Pages URL once the repo's Pages site is enabled (Settings → Pages → Source: `main` branch / root, then `https://stubbslab.github.io/hf-polarimetry/examples/example_5band_wwv_browse.html`).
+
 ## What's in the repo
 
 ```
