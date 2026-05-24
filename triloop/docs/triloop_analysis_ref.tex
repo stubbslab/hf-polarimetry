@@ -1,0 +1,692 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{enumitem}
+
+\definecolor{codebg}{RGB}{245,245,250}
+\definecolor{cmdbg}{RGB}{40,42,54}
+\definecolor{cmdfg}{RGB}{248,248,242}
+
+\lstdefinestyle{py}{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    keywordstyle=\bfseries\color{blue!70!black},
+    stringstyle=\color{green!50!black},
+    commentstyle=\itshape\color{gray},
+    breaklines=true, frame=single, framesep=4pt, showstringspaces=false}
+
+\lstdefinestyle{shell}{
+    language=bash,
+    basicstyle=\ttfamily\footnotesize\color{cmdfg},
+    backgroundcolor=\color{cmdbg},
+    breaklines=true, frame=single, framesep=4pt, showstringspaces=false}
+
+\hypersetup{colorlinks=true, urlcolor=blue, linkcolor=black,
+            citecolor=black, breaklinks=true}
+
+\title{\Large\bfseries triloop \& picoacq\\[2pt]
+       \large Analysis Code Reference\\[8pt]
+       \normalsize Pipeline math, module-by-module walkthrough, and
+       per-program description}
+\author{}
+\date{\today \\[6pt] \small Version 0.1.0}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\bigskip\hrule\bigskip
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+%-----------------------------------------------------------------------
+
+This document is a developer's reference for the analysis code in
+\textsf{triloop} and the acquisition code in \textsf{picoacq}.  It
+complements the \textit{triloop User Manual} (which describes how to
+\emph{use} the tools) and the \textit{picoacq User Manual} (which
+describes the hardware and the capture file format).  Here we focus on
+\emph{what each Python module does}, in what order they are called by
+the public entry points, and the mathematics each step implements.
+
+\paragraph{Audience.} Reader is comfortable with Python, complex
+baseband signal processing, and standard linear-algebra notation.
+
+\paragraph{Conventions used in this document.} Bold lower-case
+($\mathbf b$) denotes a vector; bold upper-case ($\mathsf{N}$) denotes
+a matrix; $\hat{\mathbf k}$ is the unit propagation vector \emph{toward
+the source}; angles are in degrees in code, radians in equations.
+
+%-----------------------------------------------------------------------
+\section{Pipeline overview}
+%-----------------------------------------------------------------------
+
+A capture flows through the toolchain in four stages:
+
+\begin{enumerate}\itemsep=2pt
+\item \textbf{Acquisition} (\textsf{picoacq}).  Hardware capture
+      orchestrated by \texttt{picoacq.recorder.capture()}, which calls
+      the PicoSDK wrapper \texttt{picoacq.ps5444a} or, in
+      \texttt{--simulate} mode, \texttt{picoacq.simulator}.  Output:
+      a triloop-format HDF5 file with float32 samples in volts plus a
+      JSON \texttt{capture\_settings} dict carrying the chosen sample
+      rate, voltage ranges, auto-range probe values, and (new in v0.1)
+      the list of expected RF bands \texttt{rf\_bands\_hz}.
+\item \textbf{Band extraction} (\texttt{triloop.bands},
+      \texttt{triloop.extract}).  Read the HDF5 file with
+      \texttt{triloop.io\_hdf5.read\_capture()}; identify the baseband
+      alias position of each RF band via \texttt{picoacq.alias};
+      mix-and-LPF each channel down to a complex baseband centred on
+      that band; decimate to a workable IF rate.
+\item \textbf{Polarimetry and direction finding}
+      (\texttt{triloop.analyze}, \texttt{triloop.geometry},
+      \texttt{triloop.stokes}, \texttt{triloop.direction},
+      \texttt{triloop.beamform}).  Recover the lab-frame
+      $\mathbf B$-vector from the three loops via the inverse of the
+      geometry matrix $\mathsf{N}$, project onto the plane
+      perpendicular to $\hat{\mathbf k}$, compute Stokes parameters
+      and intensity, and (optionally) refine $\hat{\mathbf k}$ with
+      a null-eigenvector / null-sweep search.
+\item \textbf{Reporting} (\texttt{triloop.view},
+      \texttt{triloop.multiband}, \texttt{triloop.browse}).  Static
+      QC plots, multi-band comparison figures, and an interactive
+      single-file HTML browser for visual inspection.
+\end{enumerate}
+
+The CLI tools (\texttt{triloop view}, \texttt{triloop analyze-multi},
+\texttt{triloop browse}, \texttt{triloop analyze},
+\texttt{triloop locate}, \texttt{triloop batch}, \texttt{triloop
+summary}, \texttt{triloop simulate}, \texttt{triloop notebook}) wrap
+these stages in different combinations.
+
+%-----------------------------------------------------------------------
+\section{Acquisition: \textsf{picoacq}}
+%-----------------------------------------------------------------------
+
+\subsection{\texttt{picoacq.cli}}
+
+Click-based command-line interface with two subcommands:
+\texttt{capture} (one-shot) and \texttt{monitor} (continuous).  Each
+exposes the same configuration knobs as the underlying recorder; the
+defaults reflect the multi-band undersampling workflow:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{--rate 15625000} (Hz)
+\item \texttt{--duration 8.0} (s)
+\item \texttt{--channels A,B,C,D}
+\item \texttt{--range 2.0} (V; only used when \texttt{--no-auto-range})
+\item \texttt{--auto-range/--no-auto-range} (default on)
+\item \texttt{--headroom 3.0}
+\item \texttt{--probe 0.1} (auto-range probe duration, s)
+\item \texttt{--rf-bands "2.5e6,5e6,10e6,15e6,20e6"}
+\end{itemize}
+
+\subsection{\texttt{picoacq.ps5444a}}
+
+A thin \texttt{ctypes} wrapper around the PicoSDK 5000a driver.  Five
+functions:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{open\_5444(n\_channels=4)} -- context manager that opens
+      the device, automatically picking 16-bit resolution for $\le 2$
+      channels and 14-bit for 3--4 channels (5444D constraint).
+\item \texttt{configure\_channel(ps, handle, ch, range\_volts,
+      coupling)} -- enables a channel and sets its $\pm$range.
+\item \texttt{get\_timebase(ps, handle, target\_rate)} -- searches the
+      Pico timebase index space for the closest valid sample rate at
+      or below the requested target.  Skips early indices that are
+      invalid in 4-channel mode.
+\item \texttt{acquire\_block(ps, handle, channels, n, tb, ranges)} --
+      block-mode acquisition with explicit ctypes-wrapped arguments
+      to avoid signature mismatches between picosdk versions.
+\item \texttt{\_ensure\_pico\_dyld\_path()} -- macOS-only shim that
+      injects the framework library path into
+      \texttt{DYLD\_LIBRARY\_PATH} before importing \texttt{picosdk}.
+\end{itemize}
+
+\subsection{\texttt{picoacq.simulator}}
+
+The no-hardware fallback.  Generates a 3-loop synthetic dataset with
+configurable arrival direction, polarization, additive Gaussian noise,
+and Faraday rotation rate.  Used by \texttt{--simulate} mode and as
+the silent fallback when the SDK or hardware is unavailable.
+
+\subsection{\texttt{picoacq.recorder}}
+
+The orchestrator.  Top-level function:
+\texttt{capture(output\_file, duration\_s, sample\_rate, channels,
+ranges\_volts, coupling, loops\_config, simulate, sim\_kwargs,
+auto\_range\_enabled, headroom, probe\_duration\_s, rf\_bands,
+verbose)}.  Internally:
+
+\begin{enumerate}\itemsep=2pt
+\item \texttt{\_check\_buffer()} validates that
+      $\mathrm{duration}\times\mathrm{rate}$ samples fit in the
+      onboard memory (128\,MS/ch in 4-channel mode); raises
+      \texttt{ValueError} with a clear maximum if not.
+\item If auto-range is on (and \texttt{ranges\_volts} not supplied):
+      open the scope at the maximum $\pm 20$\,V on every channel,
+      run a brief probe capture (\texttt{auto\_range()}), measure
+      peak/RMS in volts, and call \texttt{\_pick\_range()} to choose
+      the smallest available Pico range whose full scale
+      $\geq K\cdot$peak (default $K = 3$).
+\item Run the science capture via \texttt{\_try\_real\_capture()};
+      on any SDK/hardware failure, fall back transparently to
+      \texttt{simulate\_capture()}.
+\item Convert int16 ADC codes $\to$ float32 volts; write to HDF5 via
+      \texttt{triloop.io\_hdf5.write\_capture()} with the chosen
+      ranges, the auto-range probe results, and \texttt{rf\_bands\_hz}
+      stored in \texttt{capture\_settings}.
+\end{enumerate}
+
+\subsection{\texttt{picoacq.alias}}
+\label{sec:alias}
+
+Pure-Python helper that maps RF frequencies to baseband alias positions
+for a given sample rate.  An RF tone at $f_{\rm rf}$ folds to baseband as
+\begin{equation}
+f_{\rm bb} = \bigl|\,f_{\rm rf} - n\,f_s\,\bigr|,
+\qquad n = \mathrm{round}(f_{\rm rf}/f_s),
+\end{equation}
+with Nyquist zone $z = \lfloor 2 f_{\rm rf}/f_s\rfloor + 1$.  Even
+zones produce a frequency-inverted spectrum.  Three exports:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{Alias} dataclass with fields
+      \texttt{(rf\_hz, baseband\_hz, nyquist\_zone, inverted)}.
+\item \texttt{alias\_of(rf\_hz, sample\_rate\_hz)} -- single mapping.
+\item \texttt{rf\_for\_baseband(f\_bb, rf\_bands, fs, tol)} --
+      inverse lookup (given a detected baseband peak, return which
+      RF band it most likely came from).
+\end{itemize}
+
+This module is the single source of truth for alias bookkeeping;
+\texttt{triloop.bands} and \texttt{triloop.view}/\texttt{browse} all
+import from it.
+
+%-----------------------------------------------------------------------
+\section{The capture file format}
+\label{sec:fileformat-ref}
+%-----------------------------------------------------------------------
+
+Both packages read and write the same HDF5 v0.1 layout:
+
+\begin{lstlisting}[style=shell]
+/                           HDF5 root, @format_version = "0.1"
+/metadata                   group, attributes:
+    @sample_rate            float64, Hz
+    @duration_s             float64
+    @start_time_utc         ISO-8601
+    @scope_model            string
+    @scope_serial           string
+    @capture_settings       JSON-encoded dict
+    @loops_config           JSON-encoded dict
+/channels
+    /A   /B   /C   /D       float32 (or int16) datasets, length N
+    each has:
+        @gain_v_per_count   float64
+        @offset_v           float64
+/time                       optional float64 array, length N
+\end{lstlisting}
+
+\noindent\texttt{capture\_settings} fields recorded by
+\texttt{picoacq.recorder.capture()}:
+\begin{itemize}\itemsep=2pt
+\item \texttt{requested\_duration\_s, requested\_sample\_rate}
+\item \texttt{channels, ranges\_volts, coupling}
+\item \texttt{used\_simulator, auto\_range\_enabled, headroom}
+\item \texttt{auto\_range\_probe} (\texttt{peaks\_volts, rms\_volts,
+      headroom, probe\_duration\_s}) -- only when probe ran
+\item \texttt{picoscope\_ranges\_volts} -- the actual chosen ranges
+\item \texttt{rf\_bands\_hz} -- list of expected RF frequencies in Hz
+\item \texttt{truth} -- only present in simulator mode
+\end{itemize}
+
+\texttt{triloop.io\_hdf5} provides \texttt{read\_capture()} and
+\texttt{write\_capture()}; both are short and tested, and any third
+party can interoperate by writing the same layout.
+
+%-----------------------------------------------------------------------
+\section{Geometry and direction transforms}
+%-----------------------------------------------------------------------
+
+\subsection{\texttt{triloop.geometry}}
+
+Operates on the loop-array geometry config dict
+(\texttt{loops\_config}).  Five public functions:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{az\_el\_to\_khat(az\_deg, el\_deg)} returns
+      $\hat{\mathbf k} = (\cos\theta\sin\varphi, \cos\theta\cos\varphi,
+      \sin\theta)^\top$ in the local ENU frame.
+\item \texttt{build\_N\_matrix(loops\_config)} returns the $3\times 3$
+      matrix $\mathsf{N}$ whose $i$-th row is the $i$-th loop's normal
+      $\hat{\mathbf n}_i$ (in ENU, scaled by per-loop gain).  This is
+      the matrix that maps the lab-frame $\mathbf B$ to the
+      loop-projected real signal $\mathbf b = \mathsf{N}\mathbf B$.
+\item \texttt{perp\_projector(khat)} returns
+      $\mathsf{P}_\perp = \mathsf{I} - \hat{\mathbf k}\hat{\mathbf k}^\top$,
+      the projector onto the plane perpendicular to $\hat{\mathbf k}$.
+\item \texttt{perp\_orthonormal\_basis(khat)} returns two unit vectors
+      $(\hat{\mathbf p}, \hat{\mathbf q})$ that span that plane, with
+      $\hat{\mathbf p}$ chosen along the local horizontal whenever
+      possible, $\hat{\mathbf q} = \hat{\mathbf k}\times\hat{\mathbf p}$.
+\item \texttt{LOOP\_NORMALS\_DEFAULT} and \texttt{\_normal\_from\_az\_el}
+      support the default cube-vertex layout.
+\end{itemize}
+
+The default geometry is three loops on three faces of a cube whose
+body diagonal is vertical, giving normal-tilts of $\arctan(1/\sqrt{2})
+\approx 35.26^\circ$ above horizontal at azimuths $\{0, +120, -120\}^\circ$.
+
+%-----------------------------------------------------------------------
+\section{Band extraction and analysis}
+%-----------------------------------------------------------------------
+
+\subsection{\texttt{triloop.extract}}
+
+Two functions covering the single-band path:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{extract\_complex\_baseband(t, b, f0, BW)} performs an
+      FFT-based peak search around $f_0$ over a $\pm$\texttt{search\_BW}
+      window, mixes the strongest peak to DC, brick-wall low-passes to
+      $\pm$\texttt{BW}/2, and returns the complex baseband at the
+      original sample rate, the detected peak frequency, and an
+      FFT-domain SNR estimate.
+\item \texttt{extract\_three\_loops(...)} calls the above on each loop,
+      applies per-loop \texttt{phase\_offset\_deg} calibration, and
+      returns a stacked $(3, N)$ complex array.
+\end{itemize}
+
+\subsection{\texttt{triloop.bands}}
+
+Multi-band counterpart, used when the capture's
+\texttt{rf\_bands\_hz} populates more than one entry.  Public
+function: \texttt{extract\_bands(cap, rf\_bands, bw\_hz, decim\_rate\_hz, channels)}.
+For every band:
+
+\begin{enumerate}\itemsep=2pt
+\item \texttt{picoacq.alias.alias\_of()} computes
+      $f_{\rm bb}$, the Nyquist zone, and \texttt{inverted}.
+\item Validate that the requested \texttt{bw\_hz} doesn't reach into
+      the adjacent Nyquist edge or another band's alias.
+\item Mix every selected channel down to $f_{\rm bb}$ via FFT
+      (\texttt{\_extract\_one\_channel}), brick-wall filter to
+      $\pm$\texttt{bw\_hz}/2, decimate to the smallest integer factor
+      that yields $\geq$ \texttt{decim\_rate\_hz}, and conjugate the
+      result if the band lives in an even (inverted) Nyquist zone.
+\end{enumerate}
+
+Returns a dict mapping \texttt{rf\_hz} $\to$ \texttt{BandExtraction}
+dataclass with fields
+\texttt{rf\_hz, baseband\_hz, nyquist\_zone, inverted, bw\_hz,
+decim\_rate\_hz, t, z}, where \texttt{z} is a per-channel dict of
+\texttt{complex64} arrays.
+
+\subsection{\texttt{triloop.analyze}}
+
+The polarimetry pipeline.  Two public entry points:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{analyze(t, B1, B2, B3, f0, BW, az\_deg, el\_deg, loops\_config)}
+      -- starts from real loop signals, calls
+      \texttt{extract\_three\_loops()}, then forwards to:
+\item \texttt{analyze\_z\_loops(t, Z\_loops, f\_peak, snrs\_db, az\_deg, el\_deg, loops\_config)}
+      -- the inner pipeline, also called directly by the multi-band
+      path.
+\end{itemize}
+
+The inner pipeline computes:
+
+\begin{align}
+  \mathbf z_{\rm lab}(t) &= \mathsf{N}^{-1}\mathbf z_{\rm loops}(t),\\
+  \mathbf z_\perp(t) &= \mathsf{P}_\perp \mathbf z_{\rm lab}(t),\\
+  I(t) &= |\mathbf z_\perp|^2,\\
+  A_p(t) &= \hat{\mathbf p}\cdot\mathbf z_\perp,\quad
+  A_q(t) = \hat{\mathbf q}\cdot\mathbf z_\perp,
+\end{align}
+then forwards $(A_p, A_q)$ to \texttt{stokes.compute\_stokes()} which
+returns the four Stokes parameters, the polarization fraction
+$\sqrt{Q^2+U^2+V^2}/I$, the ellipticity $\frac12 \arcsin(V/I_p)$ in
+degrees ($\pm 45^\circ$ at full circular polarization), and the
+position angle $\frac12 \arctan2(U, Q)$.
+
+A $2\times 2$ coherency on $(A_p, A_q)$ identifies the dominant-pol
+eigenvector $u_{\rm dom}$, and
+$z_{\rm dom}(t) = u_{\rm dom}^\top (A_p, A_q)$ provides an instantaneous
+phase signal whose unwrapped, linearly-detrended residual gives both
+the residual carrier frequency and a time-resolved frequency series via
+\texttt{numpy.gradient}.  Everything is bundled into an
+\texttt{AnalysisResult} dataclass.
+
+\subsection{\texttt{triloop.multiband}}
+
+Wraps band extraction and per-band analysis.  Public functions:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{analyze\_all\_bands(cap, az\_deg, el\_deg,
+      loops\_channels, bw\_hz, decim\_rate\_hz, rf\_bands, loops\_config)}
+      -- calls \texttt{extract\_bands} once and runs
+      \texttt{analyze\_z\_loops} on each band.  Returns a dict mapping
+      \texttt{rf\_hz} $\to$ \texttt{MultiBandResult} with fields
+      \texttt{(rf\_hz, extraction, analysis, snrs\_db)}.
+\item \texttt{make\_multiband\_figure(results, out\_path)} -- plot a
+      five-row, four-column matplotlib figure (one row per band) of
+      intensity, instantaneous frequency, ellipticity, and polarization
+      fraction.
+\end{itemize}
+
+%-----------------------------------------------------------------------
+\section{Direction finding}
+%-----------------------------------------------------------------------
+
+\subsection{\texttt{triloop.direction}}
+
+Public functions, all operating on a stacked lab-frame complex array
+$\mathsf{Z}_{\rm lab}\in\mathbb{C}^{3\times N}$:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{coherency\_matrix(Z\_lab)} returns
+      $\mathsf{C} = \tfrac{1}{N}\mathsf{Z}_{\rm lab}\mathsf{Z}_{\rm lab}^H$,
+      the $3\times 3$ Hermitian coherency.
+\item \texttt{estimate\_direction\_from\_z\_lab(Z\_lab)} returns the
+      smallest-eigenvalue eigenvector of $\mathsf{C}$ as
+      $\hat{\mathbf k}_{\rm est}$, plus the polarization basis
+      ($\hat{\mathbf p}$, $\hat{\mathbf q}$ from the two largest
+      eigenvectors), the eigenvalues (descending), and a scalar
+      \texttt{null\_strength} $\lambda_3/\lambda_1$.  This is the
+      \emph{coarse} direction estimate; small \texttt{null\_strength}
+      means the rank-1 trap (\S~\ref{sec:rank1ref}) is broken and
+      the estimate is trustworthy.
+\item \texttt{perp\_residual\_energy(Z\_lab, khat)} computes
+      $\langle |\hat{\mathbf k}\cdot \mathbf z_{\rm lab}|^2 \rangle$,
+      the quantity minimised by direction finding.
+\item \texttt{null\_search(Z\_lab, az0, el0, half\_width\_deg, n\_points)}
+      performs a 2-D grid sweep around $(az_0, el_0)$ and returns the
+      minimiser plus the full residual map.
+\item \texttt{parabolic\_refine(R, az\_grid, el\_grid)} fits a
+      parabola to the $3\!\times\!3$ neighbourhood of the grid
+      minimum to give a sub-grid direction.
+\item \texttt{lock\_and\_analyze(...)} -- end-to-end entry point used
+      by the \texttt{locate} CLI.
+\end{itemize}
+
+\subsection{Why find the null instead of the maximum?}
+\label{sec:rank1ref}
+
+The direction-formed power
+$P(\hat{\mathbf k}) = \langle|\mathbf B_\perp(\hat{\mathbf k})|^2\rangle$
+varies as $\frac12 + \frac12\cos^2\beta$ near the true direction
+$\hat{\mathbf k}_{\rm true}$ (a shallow plateau).  The
+\emph{perpendicular} residual
+$Q(\hat{\mathbf k}) = \langle|\hat{\mathbf k}\cdot\mathbf B|^2\rangle$
+varies as $\sin^2\beta\sim\beta^2$ near the same direction (a sharp
+parabolic minimum).  Localising a parabolic minimum is far more
+precise than a cosine-squared maximum, so we always lock on the null
+rather than the peak.
+
+For purely linearly polarized signals from a single direction,
+$\mathsf{C}$ is rank 1 and the null is a 2-D plane rather than a
+point.  In that regime \texttt{estimate\_direction\_from\_z\_lab}
+returns \emph{a} direction (the smallest-eigenvalue one within
+floating-point noise), but it is not physically meaningful; trustworthy
+localisation requires Faraday rotation, a circularly polarized source,
+or triangulation.
+
+\subsection{\texttt{triloop.beamform}}
+
+Older, simpler beamforming sweep used by some analysis notebooks.
+Two functions:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{beamform\_grid(z\_loops, loops\_config, az\_grid\_deg,
+      el\_grid\_deg)} -- compute time-averaged
+      $P(\varphi, \theta) = \langle|\mathbf B_\perp(\hat{\mathbf k}_{\varphi,\theta})|^2\rangle$
+      over a 2-D grid.
+\item \texttt{best\_direction(P, az\_grid, el\_grid)} -- return the
+      $\arg\max$ as $(\varphi, \theta)$.
+\end{itemize}
+
+\subsection{\texttt{triloop.stokes}}
+
+A single function: \texttt{compute\_stokes(A\_p, A\_q)} returning a
+dict with \texttt{I, Q, U, V, pol\_fraction, ellipticity\_deg,
+position\_angle\_deg}.  Definitions:
+$I = |A_p|^2 + |A_q|^2$,
+$Q = |A_p|^2 - |A_q|^2$,
+$U = 2\Re\{A_p^*A_q\}$,
+$V = 2\Im\{A_p^*A_q\}$.
+
+%-----------------------------------------------------------------------
+\section{Reporting and visualization}
+%-----------------------------------------------------------------------
+
+\subsection{\texttt{triloop.view}}
+
+Static QC PNG generator used by \texttt{triloop view}.
+\texttt{make\_view\_figure(cap, rf\_bands, bw\_hz, out\_path)}
+produces a single matplotlib figure with three rows: a full-Nyquist
+PSD with each RF band annotated at its alias position, per-band PSD
+zooms (with the displayed Δf-axis flipped for inverted bands so the
+operator reads frequencies the right way), a decimated time-domain
+trace of every channel, and the auto-range probe table.
+
+\subsection{\texttt{triloop.browse}}
+
+Interactive single-file HTML browser.  Top-level entry points:
+
+\begin{itemize}\itemsep=2pt
+\item \texttt{build\_browser\_html(cap, az\_deg, el\_deg,
+      loops\_channels, bw\_hz, decim\_rate\_hz, n\_anim\_frames,
+      title)} -- returns a self-contained HTML string.
+\item \texttt{write\_browser(cap, out\_path, **kw)} -- save it to disk.
+\end{itemize}
+
+The page uses Plotly (loaded once via CDN; if you need a fully offline
+build, change the \texttt{include\_plotlyjs="cdn"} argument to
+\texttt{True} and the page will inline the entire library at the cost
+of $\sim 3$\,MB extra).  Layout: tab bar at the top with
+\textit{Overview}, \textit{Time series}, and one tab per RF band.
+The per-band tab has four panels: PSD zoom, intensity time history
+(linear + togglable dB), intensity CDF with P10/P1 fade-depth markers,
+and an animated polarization ellipse with Play/Pause and a frame
+slider.
+
+The animation is implemented as Plotly frames; each frame draws a
+sliding window of $(\Re A_p, \Re A_q)$ samples centred on a different
+slow-time epoch.  The window length is chosen automatically to be a
+few cycles of the residual carrier-phase variation at the decimated
+rate.
+
+%-----------------------------------------------------------------------
+\section{Module roll call}
+%-----------------------------------------------------------------------
+
+This section lists every Python file in both packages and what each
+one provides.  Treat it as a table of contents for the source.
+
+\subsection{\textsf{picoacq}}
+
+\begin{tabular}{p{0.21\linewidth}p{0.74\linewidth}}
+\toprule
+\textbf{Module} & \textbf{Purpose} \\\midrule
+\texttt{\_\_init\_\_.py} & package marker; no public API of its own. \\
+\texttt{cli.py}   & Click-based CLI; subcommands \texttt{capture} and
+                    \texttt{monitor}.  Reads
+                    \texttt{--rate / --duration / --channels /
+                    --range / --auto-range / --headroom / --probe /
+                    --rf-bands / --simulate / --sim-*} options and
+                    forwards them to \texttt{recorder.capture()}. \\
+\texttt{recorder.py} & Top-level \texttt{capture()} orchestrator with
+                    \texttt{\_check\_buffer()} guard,
+                    \texttt{auto\_range()} probe, range chooser
+                    \texttt{\_pick\_range()}, and the
+                    \texttt{\_try\_real\_capture()} hardware path
+                    (with simulator fallback). \\
+\texttt{ps5444a.py} & PicoSDK 5000a wrapper: \texttt{open\_5444()},
+                    \texttt{configure\_channel()},
+                    \texttt{get\_timebase()}, \texttt{acquire\_block()}.
+                    Plus \texttt{\_ensure\_pico\_dyld\_path()} for
+                    macOS framework search. \\
+\texttt{simulator.py} & \texttt{simulate\_capture()} -- 3-loop
+                    no-hardware fallback compatible with the
+                    \texttt{recorder} return shape. \\
+\texttt{alias.py}    & RF~$\leftrightarrow$~baseband mapping under
+                    bandpass undersampling.  Public:
+                    \texttt{Alias} dataclass,
+                    \texttt{alias\_of()},
+                    \texttt{aliases\_for\_bands()},
+                    \texttt{rf\_for\_baseband()}.  See
+                    Section~\ref{sec:alias}. \\
+\bottomrule
+\end{tabular}
+
+\subsection{\textsf{triloop}}
+
+\begin{tabular}{p{0.21\linewidth}p{0.74\linewidth}}
+\toprule
+\textbf{Module} & \textbf{Purpose} \\\midrule
+\texttt{\_\_init\_\_.py} & re-exports the public API (see
+                    \textit{User Manual} for the full list). \\
+\texttt{cli.py}   & Click-based CLI; subcommands
+                    \texttt{view, analyze-multi, browse, analyze,
+                    locate, batch, summary, simulate, notebook}. \\
+\texttt{io\_hdf5.py}  & \texttt{read\_capture()} and
+                    \texttt{write\_capture()} for the HDF5 v0.1 layout
+                    described in \S\ref{sec:fileformat-ref}. \\
+\texttt{config.py}    & \texttt{default\_loops\_config()} (cube-vertex
+                    geometry) and \texttt{validate\_loops\_config()}
+                    schema check. \\
+\texttt{geometry.py}  & \texttt{az\_el\_to\_khat()},
+                    \texttt{build\_N\_matrix()},
+                    \texttt{perp\_projector()},
+                    \texttt{perp\_orthonormal\_basis()},
+                    \texttt{LOOP\_NORMALS\_DEFAULT}. \\
+\texttt{extract.py}   & Single-band complex-baseband extractor:
+                    \texttt{extract\_complex\_baseband()},
+                    \texttt{extract\_three\_loops()}. \\
+\texttt{bands.py}     & Multi-band extractor:
+                    \texttt{extract\_bands()},
+                    \texttt{BandExtraction} dataclass. \\
+\texttt{stokes.py}    & \texttt{compute\_stokes(A\_p, A\_q)} ->
+                    Stokes parameters and derived quantities. \\
+\texttt{analyze.py}   & Top-level \texttt{analyze()} and inner
+                    \texttt{analyze\_z\_loops()}; \texttt{AnalysisResult}
+                    dataclass. \\
+\texttt{multiband.py} & \texttt{analyze\_all\_bands()} (extract +
+                    analyze for every band) and
+                    \texttt{make\_multiband\_figure()}. \\
+\texttt{direction.py} & Coherency-based direction finding:
+                    \texttt{coherency\_matrix()},
+                    \texttt{estimate\_direction\_from\_z\_lab()},
+                    \texttt{perp\_residual\_energy()},
+                    \texttt{null\_search()},
+                    \texttt{parabolic\_refine()},
+                    \texttt{lock\_and\_analyze()}. \\
+\texttt{beamform.py}  & Older/simpler grid-sweep:
+                    \texttt{beamform\_grid()},
+                    \texttt{best\_direction()}. \\
+\texttt{view.py}      & Static QC PNG: \texttt{make\_view\_figure()}. \\
+\texttt{browse.py}    & Interactive Plotly HTML browser:
+                    \texttt{build\_browser\_html()},
+                    \texttt{write\_browser()}, plus the helpers
+                    \texttt{\_channel\_psd()},
+                    \texttt{\_band\_zoom\_spectrum()},
+                    \texttt{\_smooth\_decimate()},
+                    \texttt{\_cdf()},
+                    \texttt{\_build\_pol\_animation()}. \\
+\bottomrule
+\end{tabular}
+
+%-----------------------------------------------------------------------
+\section{Tracing a capture through the code}
+%-----------------------------------------------------------------------
+
+To consolidate the picture above, here are the call paths for the
+three new commands:
+
+\paragraph{\texttt{triloop view cap.h5}.}
+\begin{enumerate}\itemsep=2pt
+\item \texttt{cli.view\_cmd} parses options.
+\item \texttt{io\_hdf5.read\_capture(cap.h5)} -> dict.
+\item \texttt{view.make\_view\_figure(cap, rf\_bands, bw\_hz, out\_path)}.
+\item Inside \texttt{make\_view\_figure}: per-channel PSD via
+      \texttt{\_channel\_psd}; per-band zoom via
+      \texttt{\_band\_zoom\_spectrum} (calls
+      \texttt{picoacq.alias.alias\_of} for each band centre);
+      time-domain decimated; probe table from
+      \texttt{capture\_settings.auto\_range\_probe}.
+\end{enumerate}
+
+\paragraph{\texttt{triloop analyze-multi cap.h5 --az 9 --el 35}.}
+\begin{enumerate}\itemsep=2pt
+\item \texttt{cli.analyze\_multi\_cmd} parses options.
+\item \texttt{io\_hdf5.read\_capture(cap.h5)} -> dict.
+\item \texttt{multiband.analyze\_all\_bands(cap, az, el, ...)}:
+\begin{enumerate}\itemsep=1pt
+\item \texttt{bands.extract\_bands(cap, ...)} which for each band uses
+      \texttt{picoacq.alias.alias\_of} to find $f_{\rm bb}$, then mixes
+      and decimates each channel via \texttt{\_extract\_one\_channel}.
+\item For each band: \texttt{\_per\_loop\_snr\_from\_baseband}, then
+      \texttt{analyze.analyze\_z\_loops(t, Z\_loops, f\_rf, ...)}.
+\end{enumerate}
+\item \texttt{multiband.make\_multiband\_figure(results, out\_png)}.
+\item Per-band JSON summary written to \texttt{out\_json}.
+\end{enumerate}
+
+\paragraph{\texttt{triloop browse cap.h5}.}
+\begin{enumerate}\itemsep=2pt
+\item \texttt{cli.browse\_cmd} parses options.
+\item \texttt{io\_hdf5.read\_capture(cap.h5)} -> dict.
+\item \texttt{browse.write\_browser(cap, out\_html, ...)} which calls
+      \texttt{build\_browser\_html(cap, ...)}:
+\begin{enumerate}\itemsep=1pt
+\item Calls \texttt{multiband.analyze\_all\_bands} (same path as
+      above) to populate per-band intensity, ellipticity, and
+      $A_p / A_q$ time series.
+\item Builds per-tab Plotly figures: overview PSD, time series, and
+      one 4-panel tab per band.
+\item For each band assembles a polarization-ellipse animation via
+      \texttt{\_build\_pol\_animation()} (Plotly frames + slider).
+\item Renders the page using \texttt{plotly.io.to\_html()} for each
+      figure into a tabbed HTML scaffold.
+\end{enumerate}
+\end{enumerate}
+
+%-----------------------------------------------------------------------
+\section{Testing and verification}
+%-----------------------------------------------------------------------
+
+The test suite under \texttt{triloop/tests/} exercises the analysis
+pipeline against the simulator at known polarizations and directions.
+Useful commands during development:
+
+\begin{lstlisting}[style=shell]
+# Create a synthetic 4-channel capture with all 5 WWV bands aliased
+PYTHONPATH=triloop:picoacq python3 -m picoacq.cli capture \
+    --simulate --duration 0.5 -o sim.h5
+
+# Run the multi-band analysis and confirm pol_frac and ellipticity
+PYTHONPATH=triloop:picoacq python3 -m triloop.cli analyze-multi sim.h5 \
+    --az 9 --el 35
+
+# Render the interactive browser
+PYTHONPATH=triloop:picoacq python3 -m triloop.cli browse sim.h5
+\end{lstlisting}
+
+For the end-to-end ``does the alias arithmetic come out right'' check
+on a synthetic 4-channel 15.625\,MS/s capture, see
+\texttt{triloop/triloop/bands.py} (specifically \texttt{extract\_bands}
+will raise \texttt{ValueError} if the requested per-band bandwidth
+overlaps the Nyquist edge or another band's alias, which is the
+nearest thing to an automatic correctness check).
+
+\end{document}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "picoacq"
+version = "0.1.0"
+description = "PicoScope 5444D data acquisition for triloop captures"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "h5py",
+    "click>=8",
+    "triloop",         # for the HDF5 schema and write_capture
+]
+
+[project.optional-dependencies]
+hardware = ["picosdk"]   # PicoSDK Python wrappers, requires PicoSDK installed
+
+[project.scripts]
+picoacq = "picoacq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["picoacq*"]

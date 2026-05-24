@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# LaTeX intermediates (we keep the .pdf and .tex)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Test / cache
+.pytest_cache/
+.mpl_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Per-user generated outputs (we ship the example pre-rendered, but
+# don't commit subsequent regenerations)
+*_view.png
+*_multiband.png
+*_multiband.json
+capture_*.h5
+cap_*.h5

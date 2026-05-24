@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triloop"
+version = "0.1.0"
+description = "Three-loop magnetic-field array analysis (HF polarimetry)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "matplotlib",
+    "click>=8",
+]
+
+[project.optional-dependencies]
+notebook = ["jupyterlab", "ipywidgets"]
+browser = ["plotly>=5"]   # for `triloop browse`
+all = ["jupyterlab", "ipywidgets", "plotly>=5"]
+
+[project.scripts]
+triloop = "triloop.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["triloop*"]
+
+[tool.setuptools.package-data]
+triloop = ["../notebooks/*.ipynb"]
