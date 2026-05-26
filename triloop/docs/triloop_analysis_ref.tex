@@ -472,7 +472,23 @@ flat-Earth-approximated three-quarter-path location at altitude
 $h_{\rm km}$, with $\hat k$ pointing down and toward the receiver in
 local exit-ENU.  \texttt{entry\_point\_geometry} returns the same
 quantities at the upgoing entry (quarter path, $\hat k$ pointing up
-and toward the apex).
+and toward the apex).  For paths beyond ~2200\,km a single F2 hop
+will not fit; \texttt{multi\_hop\_geometry(..., n\_hops=N, ...)}
+returns the last-hop \texttt{ExitGeometry} of an $N$-hop ground-bounce
+path, which is the wave that physically arrives at the receiver.
+
+\paragraph{Apparent angle of arrival.}  The
+\texttt{ExitGeometry} dataclass carries three AoA-relevant fields:
+\texttt{el\_rx\_deg} (the flat-Earth elevation, used internally for
+the $\hat k$ direction), \texttt{el\_rx\_spherical\_deg} (the more
+accurate spherical-Earth value via Davies eq.\ 4.5), and
+\texttt{az\_rx\_to\_src\_deg} (the great-circle initial bearing
+from RX to TX).  The flat- vs spherical-Earth elevation difference
+is $\sim h/(2R_e) \cdot $\,(range-dependent factor) — around
+2--4$^\circ$ for 800--1400\,km hops at $h = 250$\,km — and the user
+should always quote the spherical value for antenna pointing or
+operator-facing reports.  See Section~\ref{sec:worked-paths-ref} for
+the FC $\to$ APO and FC $\to$ Boston worked tables.
 
 \paragraph{The symmetry test we expected and the one that actually
 holds.}  Naively, $\theta_{\rm entry} + \theta_{\rm exit}$ should equal
@@ -555,6 +571,43 @@ quantitative work the right tool is PHaRLAP (Cervera, DSTG/U.\
 Adelaide), which traces the full 3-D Haselgrove ray equations through
 an IRI ionosphere with IGRF.  See \texttt{triloop.pharlap\_predict}
 (planned) for the offline-prediction interface.
+
+\subsection{Worked paths: WWV $\to$ APO and WWV $\to$ Boston}
+\label{sec:worked-paths-ref}
+
+These two paths cover the typical 1-hop and multi-hop regimes for
+mid-latitude HF polarimetry.  Both receivers listen to WWV's
+transmitter at Fort Collins, CO ($40.68^\circ$\,N, $-105.04^\circ$\,W).
+
+\paragraph{FC $\to$ APO  (1-hop, 881\,km).}
+$\theta_{\rm exit} = 70^\circ$, ray elevation at RX is $27.1^\circ$
+(spherical) / $29.6^\circ$ (flat-Earth), great-circle bearing
+$4.3^\circ$ (effectively due N).  Mode axial ratio runs from 0.52 at
+2.5\,MHz to 0.92 at 20\,MHz --- modes are moderately linear at low
+$f$ and near-circular at high $f$.
+
+\paragraph{FC $\to$ Boston (Harvard, 2812\,km, 2-hop).}
+Last-hop range $1406$\,km, $\theta_{\rm exit} = 55^\circ$, ray
+elevation at RX is $16.0^\circ$ (spherical) / $19.6^\circ$
+(flat-Earth), great-circle bearing $277.7^\circ$ (effectively due W).
+Mode axial ratio runs from 0.72 at 2.5\,MHz to 0.96 at 20\,MHz ---
+the smaller exit-point $\theta$ pushes the modes more circular than
+APO at every band.
+
+The user manual's \S Worked paths gives the full 5-band tables.
+Reproduce them via:
+\begin{lstlisting}[style=py]
+from triloop import multi_hop_geometry, modes_at_exit
+g_apo = multi_hop_geometry(40.6796, -105.0411, 32.7803, -105.8200,
+                           n_hops=1, h_km=250.0)
+g_bos = multi_hop_geometry(40.6796, -105.0411, 42.3744, -71.1169,
+                           n_hops=2, h_km=250.0)
+for f_MHz in [2.5, 5, 10, 15, 20]:
+    m_apo = modes_at_exit(g_apo, f_MHz * 1e6)
+    m_bos = modes_at_exit(g_bos, f_MHz * 1e6)
+    print(f"{f_MHz:5.1f} MHz: APO AR={m_apo.axial_ratio_O:.3f}, "
+          f"Boston AR={m_bos.axial_ratio_O:.3f}")
+\end{lstlisting}
 
 %-----------------------------------------------------------------------
 \section{Direction finding}
@@ -768,8 +821,16 @@ one provides.  Treat it as a table of contents for the source.
                     \texttt{khat\_propagation()},
                     \texttt{igrf\_b\_hat\_enu()} (with pyIGRF or
                     fallback approximation),
-                    \texttt{exit\_point\_geometry()},
+                    \texttt{haversine\_km()},
+                    \texttt{initial\_bearing\_deg()},
+                    \texttt{spherical\_elevation\_at\_rx\_deg()},
+                    \texttt{gc\_intermediate\_point()},
+                    \texttt{exit\_point\_geometry()} (returns flat-
+                    Earth and spherical-Earth elevation, plus
+                    great-circle bearing),
                     \texttt{entry\_point\_geometry()},
+                    \texttt{multi\_hop\_geometry()} (last-hop
+                    geometry for n-hop F2 ground-bounce paths),
                     \texttt{modes\_at\_exit()},
                     \texttt{integrated\_faraday\_rotation\_rad()};
                     \texttt{ExitGeometry, EntryGeometry, ModeAtExit}

@@ -788,6 +788,139 @@ provided by \texttt{triloop.integrated\_faraday\_rotation\_rad}.  At
 30\,TECU on the FC$\to$APO path this is $\sim 4500$ turns at 2.5\,MHz
 and $\sim 70$ turns at 20\,MHz.
 
+\subsection{Worked paths: WWV $\to$ APO and WWV $\to$ Boston}
+\label{sec:worked-paths}
+
+The two tables below summarise the apparent angle of arrival and
+the predicted O/X mode polarization at two reference receivers, both
+listening to WWV's transmitter at Fort Collins, CO ($40.68^\circ$\,N,
+$-105.04^\circ$\,W).  Reflection altitude is taken as 250\,km
+throughout.  The fallback IGRF values are used for the geomagnetic
+field; install \texttt{pyIGRF} for full IGRF-13 accuracy.
+
+\paragraph{1.  FC $\to$ Apache Point Observatory  (APO, NM,
+$32.78^\circ$\,N, $-105.82^\circ$\,W).}
+880\,km path: a single F2 hop fits comfortably.  The path is nearly
+N--S along the 105$^\circ$\,W meridian.
+
+\begin{table}[h]\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Path geometry} & \textbf{Value} \\\midrule
+Great-circle range          & 881 km          \\
+Hops                        & 1               \\
+Reflection altitude         & 250 km          \\
+\textbf{AoA elevation at RX (spherical Earth)} & \textbf{27.1$^\circ$} \\
+AoA elevation at RX (flat Earth)               & 29.6$^\circ$ \\
+\textbf{AoA azimuth at RX (great circle)}      & \textbf{4.3$^\circ$ from N CW} \\
+Exit point lat / lon        & 34.76$^\circ$\,N, $-105.63^\circ$\,W \\
+$\theta(\hat k, \hat B)$ at exit & 70$^\circ$       \\
+$|B|$ at exit / $f_H$       & 50 µT / 1.40 MHz \\\bottomrule
+\end{tabular}
+\caption{FC $\to$ APO path geometry.}
+\end{table}
+
+\begin{table}[h]\centering
+\begin{tabular}{ccccccl}
+\toprule
+$f$ (MHz) & $Y\!=\!f_H/f$ & $q$ & axial ratio & $\chi_O$ & $\chi_X$ & character \\\midrule
+ 2.5  & 0.56 & 0.71 & 0.52 & $+27^\circ$ & $-27^\circ$ & moderately linear \\
+ 5.0  & 0.28 & 0.35 & 0.71 & $+35^\circ$ & $-35^\circ$ & elliptical        \\
+10.0  & 0.14 & 0.18 & 0.84 & $+40^\circ$ & $-40^\circ$ & elliptical        \\
+15.0  & 0.09 & 0.12 & 0.89 & $+42^\circ$ & $-42^\circ$ & near-circular     \\
+20.0  & 0.07 & 0.09 & 0.92 & $+43^\circ$ & $-43^\circ$ & near-circular     \\
+\bottomrule
+\end{tabular}
+\caption{Mode polarization at the descending exit point for FC $\to$
+APO. $Y \equiv f_H/f$, $q \equiv Y_T^2/(2 Y_L)$.  Both modes share
+the same axial ratio; the X mode's major axis is rotated 90$^\circ$
+from the O mode's (which lies along the projection of $\hat B$ onto
+the perp-plane).}
+\end{table}
+
+\paragraph{2.  FC $\to$ Boston (Harvard, $42.37^\circ$\,N,
+$-71.12^\circ$\,W).}
+2812\,km path, well beyond the 1-hop F2 limit (~2200 km at low
+elevation).  The dominant daytime mode is 2-hop F2 with a ground
+bounce around Madison/Chicago.  The polarization that physically
+arrives at Boston is set by the descending leg of the
+\emph{last} hop (mid-bounce $\to$ Boston, ~1406 km).
+
+\begin{table}[h]\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Path geometry} & \textbf{Value} \\\midrule
+Full great-circle range          & 2812 km            \\
+Hops                             & 2 (last hop shown) \\
+Last-hop range                   & 1406 km            \\
+Reflection altitude              & 250 km             \\
+\textbf{AoA elevation at RX (spherical Earth)} & \textbf{16.0$^\circ$} \\
+AoA elevation at RX (flat Earth)               & 19.6$^\circ$ \\
+\textbf{AoA azimuth at RX (great circle)}      & \textbf{277.7$^\circ$ from N CW} \\
+Last-hop exit point lat / lon    & 42.48$^\circ$\,N, $-75.42^\circ$\,W \\
+$\theta(\hat k, \hat B)$ at exit & 55$^\circ$         \\
+$|B|$ at exit / $f_H$            & 50 µT / 1.40 MHz   \\\bottomrule
+\end{tabular}
+\caption{FC $\to$ Boston path geometry, last hop.}
+\end{table}
+
+\begin{table}[h]\centering
+\begin{tabular}{ccccccl}
+\toprule
+$f$ (MHz) & $Y\!=\!f_H/f$ & $q$ & axial ratio & $\chi_O$ & $\chi_X$ & character \\\midrule
+ 2.5  & 0.56 & 0.33 & 0.72 & $+36^\circ$ & $-36^\circ$ & elliptical    \\
+ 5.0  & 0.28 & 0.16 & 0.85 & $+40^\circ$ & $-40^\circ$ & elliptical    \\
+10.0  & 0.14 & 0.08 & 0.92 & $+43^\circ$ & $-43^\circ$ & near-circular \\
+15.0  & 0.09 & 0.06 & 0.95 & $+43^\circ$ & $-43^\circ$ & near-circular \\
+20.0  & 0.07 & 0.04 & 0.96 & $+44^\circ$ & $-44^\circ$ & near-circular \\
+\bottomrule
+\end{tabular}
+\caption{Mode polarization at the descending exit point for the last
+hop of FC $\to$ Boston.}
+\end{table}
+
+\paragraph{Key contrasts.}
+\begin{itemize}\itemsep=2pt
+\item Boston's last-hop $\theta = 55^\circ$ is closer to the QL limit
+      than APO's $\theta = 70^\circ$, so at every band Boston's modes
+      are \emph{more} circular than APO's.
+\item Both paths show the same $f$-dependence: low frequency gives
+      smaller axial ratio (more linear), high frequency gives larger
+      axial ratio (more circular).  This is opposite to the
+      Faraday-rotation magnitude, which is huge at low $f$ and small
+      at high $f$.  ``Faraday large'' does \emph{not} mean ``modes
+      circular'' --- the modes' shape and the path-integrated
+      differential phase are independent observables.
+\item The flat-Earth elevation overestimates the spherical-Earth
+      elevation by 2.5--3.5$^\circ$ on these paths.  The
+      \texttt{ExitGeometry} returned by
+      \texttt{exit\_point\_geometry} carries both: use
+      \texttt{el\_rx\_spherical\_deg} for operator-facing reports
+      and antenna pointing.
+\item The flat-Earth ``source bearing at RX'' that the code uses for
+      its $\hat k$ direction is also slightly off compared to the
+      proper great-circle initial bearing (1$^\circ$ for APO, 6$^\circ$
+      for Boston).  The mode-polarization output uses the flat-Earth
+      $\hat k$ for self-consistency with the rest of the geometry,
+      but \texttt{az\_rx\_to\_src\_deg} reports the great-circle
+      bearing for operator pointing.
+\end{itemize}
+
+\paragraph{Multi-hop paths.}  For paths beyond ~2200\,km, use the
+\texttt{multi\_hop\_geometry} helper which returns the
+\texttt{ExitGeometry} of the last hop:
+\begin{lstlisting}[style=py]
+from triloop import multi_hop_geometry
+g = multi_hop_geometry(40.6796, -105.0411,    # FC
+                       42.3744,  -71.1169,    # Boston
+                       n_hops=2, h_km=250.0)
+print(g.el_rx_spherical_deg, g.az_rx_to_src_deg, g.theta_deg)
+\end{lstlisting}
+For non-mid-latitude or non-symmetric paths (e.g.\ trans-equatorial
+where the two hops have very different magnetic geometry) the
+flat-mirror, equal-hop assumption breaks down and PHaRLAP-style
+ray-tracing is the right tool.
+
 \subsection{Interactive HTML browser (\texttt{triloop browse})}
 \label{sec:browse}
 

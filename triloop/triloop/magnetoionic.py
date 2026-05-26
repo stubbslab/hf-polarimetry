@@ -171,8 +171,9 @@ class ExitGeometry:
     mid_lon_deg: float
     h_km: float
     range_km: float
-    el_rx_deg: float            # ray elevation at the receiver
-    az_rx_to_src_deg: float     # bearing from rx to source (deg from N CW)
+    el_rx_deg: float            # ray elevation at the receiver (flat-Earth)
+    el_rx_spherical_deg: float  # ray elevation at the receiver (spherical Earth)
+    az_rx_to_src_deg: float     # great-circle bearing from rx -> source
     k_hat_enu: np.ndarray       # (3,) Poynting direction at exit, exit ENU
     B_hat_enu: np.ndarray       # (3,) B unit vector at exit, exit ENU
     theta_rad: float            # angle between k_hat and B_hat
@@ -235,6 +236,40 @@ def _path_point_geometry(tx_lat_deg, tx_lon_deg, rx_lat_deg, rx_lon_deg,
     return k_hat, B_hat, B_mag, sample_lat, sample_lon, range_km
 
 
+def haversine_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg, R_e_km=6371.0):
+    """Great-circle distance in km via haversine."""
+    p1, p2 = np.deg2rad([lat1_deg, lat2_deg])
+    dl = np.deg2rad(lon2_deg - lon1_deg)
+    a = np.sin((p2 - p1) / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return float(2 * R_e_km * np.arcsin(np.sqrt(a)))
+
+
+def initial_bearing_deg(lat1_deg, lon1_deg, lat2_deg, lon2_deg):
+    """Initial great-circle bearing from (lat1,lon1) toward (lat2,lon2),
+    in degrees from N CW.  Use this for the apparent source bearing at
+    the receiver: pass (rx_lat, rx_lon, tx_lat, tx_lon)."""
+    p1, p2 = np.deg2rad([lat1_deg, lat2_deg])
+    dl = np.deg2rad(lon2_deg - lon1_deg)
+    y = np.sin(dl) * np.cos(p2)
+    x = np.cos(p1) * np.sin(p2) - np.sin(p1) * np.cos(p2) * np.cos(dl)
+    return float((np.degrees(np.arctan2(y, x)) + 360.0) % 360.0)
+
+
+def spherical_elevation_at_rx_deg(range_km: float, h_km: float,
+                                  R_e_km: float = 6371.0) -> float:
+    """Elevation angle at receiver for a single-hop reflection at
+    altitude h_km on a spherical Earth.  Davies eq. 4.5 (1990).
+
+    More accurate than the flat-Earth ``arctan(h/(range/2))`` for
+    long paths (e.g. 1400 km hops to Boston, where flat-Earth
+    over-estimates by ~3.5 deg).
+    """
+    arc_half = (range_km / 2.0) / R_e_km
+    num = np.cos(arc_half) - R_e_km / (R_e_km + h_km)
+    den = np.sin(arc_half)
+    return float(np.degrees(np.arctan2(num, den)))
+
+
 def exit_point_geometry(tx_lat_deg: float, tx_lon_deg: float,
                         rx_lat_deg: float, rx_lon_deg: float,
                         h_km: float = 250.0,
@@ -248,22 +283,33 @@ def exit_point_geometry(tx_lat_deg: float, tx_lon_deg: float,
     work (errors of order h/R_Earth ≈ 4 % in the propagation-direction
     estimate at h=250 km).  Replace with a proper ray-trace through an
     IRI profile if you need degree-level direction accuracy.
+
+    The reported ``el_rx_deg`` is the flat-Earth elevation
+    (consistent with the k_hat used for mode projection); a more
+    accurate spherical-Earth value is in ``el_rx_spherical_deg``.
+    The ``az_rx_to_src_deg`` is the proper great-circle initial
+    bearing.  For paths > ~1500 km the flat-Earth and spherical
+    answers differ enough that the user should report the
+    spherical-Earth value to operators.
     """
     k_hat, B_hat, B_mag, slat, slon, range_km = _path_point_geometry(
         tx_lat_deg, tx_lon_deg, rx_lat_deg, rx_lon_deg, h_km,
         leg="descending", igrf_year=igrf_year)
 
-    el_rx_rad = np.arctan2(h_km, range_km / 2.0)
-    az_rx_to_src_rad = np.arctan2(
-        -(rx_lon_deg - tx_lon_deg), -(rx_lat_deg - tx_lat_deg))
+    range_haver = haversine_km(tx_lat_deg, tx_lon_deg, rx_lat_deg, rx_lon_deg)
+    el_flat = float(np.degrees(np.arctan2(h_km, range_haver / 2.0)))
+    el_sph  = spherical_elevation_at_rx_deg(range_haver, h_km)
+    bearing = initial_bearing_deg(rx_lat_deg, rx_lon_deg,
+                                  tx_lat_deg, tx_lon_deg)
     cos_theta = float(np.dot(k_hat, B_hat))
     theta = float(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
 
     return ExitGeometry(
         mid_lat_deg=slat, mid_lon_deg=slon, h_km=h_km,
-        range_km=range_km,
-        el_rx_deg=float(np.degrees(el_rx_rad)),
-        az_rx_to_src_deg=(float(np.degrees(az_rx_to_src_rad)) + 360.0) % 360.0,
+        range_km=range_haver,
+        el_rx_deg=el_flat,
+        el_rx_spherical_deg=el_sph,
+        az_rx_to_src_deg=bearing,
         k_hat_enu=k_hat,
         B_hat_enu=B_hat,
         theta_rad=theta,
@@ -318,6 +364,51 @@ def entry_point_geometry(tx_lat_deg: float, tx_lon_deg: float,
         B_magnitude_T=B_mag,
         f_H_hz=GAMMA_E_HZ_PER_T * B_mag,
     )
+
+
+def gc_intermediate_point(lat1_deg, lon1_deg, lat2_deg, lon2_deg,
+                          fraction):
+    """Point that fraction of the way along the great circle from
+    point 1 to point 2.  fraction=0.5 gives the midpoint.  Returns
+    (lat_deg, lon_deg)."""
+    p1 = np.deg2rad([lat1_deg, lon1_deg])
+    p2 = np.deg2rad([lat2_deg, lon2_deg])
+    e1 = np.array([np.cos(p1[0]) * np.cos(p1[1]),
+                   np.cos(p1[0]) * np.sin(p1[1]),
+                   np.sin(p1[0])])
+    e2 = np.array([np.cos(p2[0]) * np.cos(p2[1]),
+                   np.cos(p2[0]) * np.sin(p2[1]),
+                   np.sin(p2[0])])
+    e = (1 - fraction) * e1 + fraction * e2
+    e /= np.linalg.norm(e)
+    return (float(np.degrees(np.arcsin(e[2]))),
+            float(np.degrees(np.arctan2(e[1], e[0]))))
+
+
+def multi_hop_geometry(tx_lat_deg, tx_lon_deg, rx_lat_deg, rx_lon_deg,
+                       n_hops: int = 1, h_km: float = 250.0,
+                       igrf_year: float = 2026.5) -> ExitGeometry:
+    """Geometry for the *last hop* of an n-hop F2 ground-bounce path,
+    which is the wave that physically arrives at the receiver.
+
+    n_hops = 1 is identical to ``exit_point_geometry``.  For
+    n_hops = 2, the last hop runs from the great-circle midpoint
+    (a ground bounce) to the receiver; for n_hops = 3 it runs from
+    the 2/3 point; etc.
+
+    Use this for paths beyond ~2200 km (1-hop F2 limit at 250 km
+    altitude) where multi-hop propagation is required.  At 30 deg
+    elevation the 1-hop horizon is ~880 km; at 10 deg it's ~2200 km.
+    """
+    if n_hops < 1:
+        raise ValueError("n_hops must be >= 1")
+    last_hop_start_frac = (n_hops - 1) / n_hops
+    last_lat, last_lon = gc_intermediate_point(
+        tx_lat_deg, tx_lon_deg, rx_lat_deg, rx_lon_deg,
+        fraction=last_hop_start_frac)
+    return exit_point_geometry(last_lat, last_lon,
+                               rx_lat_deg, rx_lon_deg,
+                               h_km=h_km, igrf_year=igrf_year)
 
 
 def integrated_faraday_rotation_rad(B_cos_theta_avg_T: float,
