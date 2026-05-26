@@ -725,6 +725,69 @@ auto-range probe table from
 PicoScope range per channel).  This is the right tool to confirm
 ``did the capture work?'' before doing any heavier analysis.
 
+\subsection{Magnetoionic O/X mode separation}
+\label{sec:magnetoionic}
+
+For ionospheric work a more physical decomposition than receiver-frame
+Stokes parameters is the projection onto the propagation eigenmodes of
+the magnetised plasma --- the \emph{ordinary} (O) and \emph{extraordinary}
+(X) modes of Appleton-Hartree theory.  These modes are orthogonal and
+their amplitude/phase are carried adiabatically from the ionosphere
+exit point to the antenna with no further interaction (the medium is
+gone), so they are the right basis for asking ``what came out of the
+ionosphere?''.
+
+\paragraph{Convention.} $\hat k$ is along the Poynting vector,
+source $\to$ receiver.  $\theta$ is the angle between $\hat k$ and the
+geomagnetic $\hat B$ at the relevant point.  $(\hat p_B, \hat q_B)$ is
+the right-handed perpendicular-plane basis with $\hat p_B$ along the
+projection of $\hat B$.  The Appleton-Hartree polarization parameter is
+\[
+\rho_{O,X}\;=\;\frac{E_{q_B}}{E_{p_B}}\;=\;-iq\;\pm\;i\sqrt{q^2+1},
+\qquad q\;\equiv\;\frac{Y_T^2}{2\,Y_L\,(1-X)}
+\]
+with $Y = f_H/f$, $Y_L = Y\cos\theta$, $Y_T = Y\sin\theta$.  At the
+exit point, $X = f_p^2/f^2 \to 0$ (the wave is leaving the plasma),
+so the formula is a pure geometric calculation in $(\theta, f_H, f)$.
+
+\paragraph{QL and QT regimes.}  At $\theta = 0$ (quasi-longitudinal,
+$\hat k \parallel \hat B$), $Y_T = 0$ and $\rho_O \to +i$,
+$\rho_X \to -i$ --- pure RCP/LCP about $\hat k$.  At $\theta = 90^\circ$
+(quasi-transverse), $Y_L = 0$ and the modes degenerate to two
+orthogonal linear polarizations along $\hat p_B$ and $\hat q_B$.  In
+between, both modes are elliptical.  For most mid-latitude HF paths,
+the descending exit-point $\theta$ falls in the 60--90$^\circ$ range
+and the modes are moderately elliptical.
+
+\paragraph{Computing the mode separation.}  Pass transmitter and
+receiver coordinates to \texttt{analyze-multi}:
+
+\begin{lstlisting}[style=shell]
+triloop analyze-multi cap.h5 --az 9 --el 35 \
+    --tx "40.6796,-105.0411" \    # Fort Collins WWV
+    --rx "32.7803,-105.8200" \    # APO
+    --reflection-height-km 250
+\end{lstlisting}
+
+Each band's JSON record then carries an additional
+``\texttt{magnetoionic}'' field with the path geometry
+($\theta$, $|B|$, $f_H$, exit-point lat/lon), the predicted mode
+ellipticities, and the matched-filter outputs:
+$\langle |a_O|\rangle$, $\langle |a_X|\rangle$,
+$\langle |a_O|/|a_X|\rangle$, and
+$\langle\Delta\varphi\rangle = \langle\arg a_O - \arg a_X\rangle$.
+
+\paragraph{Faraday rotation.}  The total ``Faraday rotation'' that
+would be seen on a single-linear-polarization receiver is the
+path-integrated differential phase between the two modes,
+\[
+\Omega \;\approx\; \tfrac{e^3}{8\pi^2\varepsilon_0 m_e^2 c}\;
+        \frac{\langle B\cos\theta\rangle\,\mathrm{TEC}}{f^2},
+\]
+provided by \texttt{triloop.integrated\_faraday\_rotation\_rad}.  At
+30\,TECU on the FC$\to$APO path this is $\sim 4500$ turns at 2.5\,MHz
+and $\sim 70$ turns at 20\,MHz.
+
 \subsection{Interactive HTML browser (\texttt{triloop browse})}
 \label{sec:browse}
 

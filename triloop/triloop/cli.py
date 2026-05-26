@@ -334,12 +334,22 @@ def view_cmd(input_file, out_png, bw_hz, rf_bands):
               help="comma-separated RF frequencies (Hz) to analyze; "
                    "default: read rf_bands_hz from capture_settings")
 @click.option("--loops-channels", default="A,B,C", show_default=True)
+@click.option("--tx", "tx_coords", default=None,
+              help="transmitter coordinates as 'lat,lon' decimal degrees "
+                   "(e.g. '40.6796,-105.0411' for WWV).  If supplied along "
+                   "with --rx, the per-band O/X mode separation is computed.")
+@click.option("--rx", "rx_coords", default=None,
+              help="receiver coordinates as 'lat,lon' decimal degrees")
+@click.option("--reflection-height-km", type=float, default=250.0,
+              show_default=True,
+              help="assumed F2 reflection altitude (km) for the path geometry")
 @click.option("--out-png", type=click.Path(), default=None,
               help="output PNG path (default: <input>_multiband.png)")
 @click.option("--out-json", type=click.Path(), default=None,
               help="write per-band summary JSON (default: <input>_multiband.json)")
 def analyze_multi_cmd(input_file, az_deg, el_deg, bw_hz, decim_rate_hz,
-                      rf_bands, loops_channels, out_png, out_json):
+                      rf_bands, loops_channels, tx_coords, rx_coords,
+                      reflection_height_km, out_png, out_json):
     """Run the analyze pipeline on every RF band recorded in the capture."""
     from . import read_capture
     from .multiband import analyze_all_bands, make_multiband_figure
@@ -349,10 +359,22 @@ def analyze_multi_cmd(input_file, az_deg, el_deg, bw_hz, decim_rate_hz,
     bands = ([float(b) for b in rf_bands.split(",") if b.strip()]
              if rf_bands else None)
 
+    def _parse_coords(s):
+        if not s: return None, None
+        parts = s.split(",")
+        if len(parts) != 2:
+            raise click.BadParameter(f"expected 'lat,lon', got {s!r}")
+        return float(parts[0]), float(parts[1])
+    tx_lat, tx_lon = _parse_coords(tx_coords)
+    rx_lat, rx_lon = _parse_coords(rx_coords)
+
     results = analyze_all_bands(
         cap, az_deg=az_deg, el_deg=el_deg,
         loops_channels=chans, bw_hz=bw_hz,
         decim_rate_hz=decim_rate_hz, rf_bands=bands,
+        tx_lat_deg=tx_lat, tx_lon_deg=tx_lon,
+        rx_lat_deg=rx_lat, rx_lon_deg=rx_lon,
+        reflection_height_km=reflection_height_km,
     )
 
     base, _ = os.path.splitext(input_file)
@@ -373,7 +395,7 @@ def analyze_multi_cmd(input_file, az_deg, el_deg, bw_hz, decim_rate_hz,
     for f_rf in sorted(results.keys()):
         r = results[f_rf]
         ar = r.analysis
-        summary["bands"].append({
+        band_record = {
             "rf_hz": f_rf,
             "baseband_hz": r.extraction.baseband_hz,
             "nyquist_zone": r.extraction.nyquist_zone,
@@ -386,7 +408,27 @@ def analyze_multi_cmd(input_file, az_deg, el_deg, bw_hz, decim_rate_hz,
             "intensity_mean": float(np.mean(ar.intensity)),
             "intensity_std": float(np.std(ar.intensity)),
             "instant_freq_mean_Hz": float(ar.instant_freq_mean),
-        })
+        }
+        if r.mode is not None:
+            ms = r.mode
+            band_record["magnetoionic"] = {
+                "exit_lat_deg": ms.geometry.mid_lat_deg,
+                "exit_lon_deg": ms.geometry.mid_lon_deg,
+                "theta_deg":    ms.geometry.theta_deg,
+                "B_uT":         ms.geometry.B_magnitude_T * 1e6,
+                "f_H_MHz":      ms.geometry.f_H_hz / 1e6,
+                "ellipticity_O_deg": ms.mode.ellipticity_O_deg,
+                "ellipticity_X_deg": ms.mode.ellipticity_X_deg,
+                "axial_ratio_O":     ms.mode.axial_ratio_O,
+                "axial_ratio_X":     ms.mode.axial_ratio_X,
+                "mean_amp_O":   float(np.mean(np.abs(ms.a_O))),
+                "mean_amp_X":   float(np.mean(np.abs(ms.a_X))),
+                "mean_amp_ratio_O_over_X": float(
+                    np.mean(np.abs(ms.a_O)) / np.mean(np.abs(ms.a_X))
+                    if np.mean(np.abs(ms.a_X)) > 0 else float("nan")),
+                "mean_delta_phase_rad": float(np.mean(ms.delta_phase_rad)),
+            }
+        summary["bands"].append(band_record)
     with open(out_json, "w") as f:
         f.write(json.dumps(summary, indent=2))
     click.echo(f"wrote {out_png}")

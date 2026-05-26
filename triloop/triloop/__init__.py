@@ -9,7 +9,16 @@ from .geometry import (
 from .extract import extract_complex_baseband
 from .analyze import analyze, analyze_z_loops, AnalysisResult
 from .bands import extract_bands, BandExtraction
-from .multiband import analyze_all_bands, MultiBandResult, make_multiband_figure
+from .multiband import (
+    analyze_all_bands, MultiBandResult, ModeSeparation, make_multiband_figure,
+)
+from .magnetoionic import (
+    appleton_hartree_polarization, mode_unit_vectors,
+    mode_ellipticity_deg, mode_orientation_deg, mode_axial_ratio,
+    exit_point_geometry, entry_point_geometry, modes_at_exit,
+    integrated_faraday_rotation_rad,
+    ExitGeometry, EntryGeometry, ModeAtExit,
+)
 from .view import make_view_figure
 from .stokes import compute_stokes
 from .beamform import beamform_grid
@@ -39,8 +48,21 @@ __all__ = [
     "BandExtraction",
     "analyze_all_bands",
     "MultiBandResult",
+    "ModeSeparation",
     "make_multiband_figure",
     "make_view_figure",
+    "appleton_hartree_polarization",
+    "mode_unit_vectors",
+    "mode_ellipticity_deg",
+    "mode_orientation_deg",
+    "mode_axial_ratio",
+    "exit_point_geometry",
+    "entry_point_geometry",
+    "modes_at_exit",
+    "integrated_faraday_rotation_rad",
+    "ExitGeometry",
+    "EntryGeometry",
+    "ModeAtExit",
     "compute_stokes",
     "beamform_grid",
     "estimate_direction_from_z_lab",

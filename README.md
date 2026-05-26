@@ -72,6 +72,14 @@ Three subcommands cover the common cases:
 # 5x4 comparison PNG and a per-band JSON summary.
 triloop analyze-multi my_capture.h5 --az 9 --el 35
 
+# With TX/RX coordinates: also project each band onto the predicted
+# Appleton-Hartree O/X modes at the descending exit point of the ray.
+# The JSON summary then carries a "magnetoionic" field per band with
+# theta(k,B), |B|, predicted mode ellipticities, and the matched-filter
+# amplitudes |a_O|, |a_X| and their differential phase.
+triloop analyze-multi my_capture.h5 --az 9 --el 35 \
+    --tx "40.6796,-105.0411" --rx "32.7803,-105.8200"
+
 # Single-band: target a specific carrier frequency.  Useful when you
 # only care about one tone or have a non-standard capture.
 triloop analyze my_capture.h5 --carrier 25000 --bw 2000 --az 273 --el 12

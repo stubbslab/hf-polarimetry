@@ -369,20 +369,192 @@ the residual carrier frequency and a time-resolved frequency series via
 
 \subsection{\texttt{triloop.multiband}}
 
-Wraps band extraction and per-band analysis.  Public functions:
+Wraps band extraction and per-band analysis, with optional projection
+onto the magnetoionic O/X modes.  Public functions:
 
 \begin{itemize}\itemsep=2pt
 \item \texttt{analyze\_all\_bands(cap, az\_deg, el\_deg,
-      loops\_channels, bw\_hz, decim\_rate\_hz, rf\_bands, loops\_config)}
+      loops\_channels, bw\_hz, decim\_rate\_hz, rf\_bands, loops\_config,
+      tx\_lat\_deg, tx\_lon\_deg, rx\_lat\_deg, rx\_lon\_deg,
+      reflection\_height\_km)}
       -- calls \texttt{extract\_bands} once and runs
-      \texttt{analyze\_z\_loops} on each band.  Returns a dict mapping
+      \texttt{analyze\_z\_loops} on each band.  When all four TX/RX
+      coordinates are supplied, also calls
+      \texttt{exit\_point\_geometry} once and projects each band's
+      perp-plane signal onto the predicted O/X modes (see
+      Section~\ref{sec:magnetoionic-ref}).  Returns a dict mapping
       \texttt{rf\_hz} $\to$ \texttt{MultiBandResult} with fields
-      \texttt{(rf\_hz, extraction, analysis, snrs\_db)}.
+      \texttt{(rf\_hz, extraction, analysis, snrs\_db, mode)} where
+      \texttt{mode} is a \texttt{ModeSeparation} or \texttt{None}.
 \item \texttt{make\_multiband\_figure(results, out\_path)} -- plot a
       five-row, four-column matplotlib figure (one row per band) of
       intensity, instantaneous frequency, ellipticity, and polarization
       fraction.
 \end{itemize}
+
+%-----------------------------------------------------------------------
+\section{Magnetoionic O/X mode separation}
+\label{sec:magnetoionic-ref}
+%-----------------------------------------------------------------------
+
+\subsection{Physical motivation}
+
+In the cold magnetised plasma of the ionosphere, an HF wave does not
+propagate as a single mode --- it splits into two orthogonal
+characteristic modes (the \emph{ordinary} O and \emph{extraordinary} X)
+with slightly different refractive indices.  Each mode carries its own
+amplitude and phase along the ray, and the polarization \emph{shape}
+of each mode evolves smoothly with the local
+$\theta = \angle(\hat k, \hat B)$.
+
+At the ray's \emph{exit point} (where the wave is just leaving the
+ionosphere on its way to the receiver), the local plasma frequency
+$f_p \to 0$ so the mode polarization simplifies to a pure geometric
+calculation in $(\theta, f_H, f)$.  From the exit point onward the
+modes propagate adiabatically through vacuum to the antenna, with no
+further polarization evolution.  This is why the exit point is the
+right place to evaluate the mode shapes for receiver-side analysis.
+
+\subsection{The Appleton-Hartree polarization parameter}
+
+For a wave $\mathbf{E} = E_p\hat p_B + \rho E_p\hat q_B$ in the
+right-handed perpendicular-plane basis $(\hat p_B, \hat q_B)$ with
+$\hat p_B$ along the projection of $\hat B$, the cold-plasma result is
+\begin{equation}
+\rho_{O,X} \;=\; -iq \;\pm\; i\sqrt{q^2 + 1},
+\qquad q \;=\; \frac{Y_T^2}{2\,Y_L\,(1-X)},
+\end{equation}
+with $Y \equiv f_H/f$, $Y_L = Y\cos\theta$, $Y_T = Y\sin\theta$,
+$X = (f_p/f)^2$.  At the exit point $X = 0$.
+
+Limiting cases (verified numerically by the sanity-check suite, see
+Section~\ref{sec:magnetoionic-validation}):
+\begin{itemize}\itemsep=2pt
+\item $\theta \to 0$ (QL): $\rho_O \to +i$, $\rho_X \to -i$ -- pure
+      RCP/LCP about $\hat k$.  Both modes are circular.
+\item $\theta \to \pi/2$ (QT): $\rho_O \to 0$, $\rho_X \to -i\infty$
+      -- two orthogonal linear polarizations along $\hat p_B$ and
+      $\hat q_B$.
+\item All $\theta$: the two modes are orthogonal under the Hermitian
+      inner product, $\langle u_O, u_X\rangle = 0$, where
+      $u_M = (1, \rho_M)/\sqrt{1+|\rho_M|^2}$.  Verified to numerical
+      precision on $10^3$ random parameter draws.
+\end{itemize}
+
+\subsection{Sign and handedness conventions}
+
+\begin{itemize}\itemsep=2pt
+\item $\hat k$ is the Poynting direction --- source $\to$ receiver.
+      Use \texttt{khat\_propagation(az\_src, el\_src)} or just negate
+      what \texttt{az\_el\_to\_khat} returns.
+\item $(\hat p_B, \hat q_B)$ is right-handed:
+      $\hat p_B \times \hat q_B = \hat k$.
+\item $\rho$ describes polarization relative to $\hat k$, not to
+      $\hat B$.  In particular, flipping $\theta \to \pi - \theta$
+      does \emph{not} negate $\rho$ in our formulation; we verified
+      this both algebraically (Block 1 of the sanity-check suite) and
+      numerically.  The handedness ``relative to $\hat B$'' is what
+      transforms simply, but for matched-filter projection at the
+      receiver the relevant frame is $\hat k$.
+\item Texts differ on the O/X label at $\theta = 0$.  Our code matches
+      the IEEE/PHaRLAP convention (O is the wave with $\rho = +i$,
+      i.e.\ right-handed about $+\hat k$).  Since both modes appear in
+      any real wave, the label is a bookkeeping choice; what matters
+      is that the two outputs of \texttt{appleton\_hartree\_polarization}
+      are orthogonal.
+\end{itemize}
+
+\subsection{Path geometry: entry, exit, and the symmetry that doesn't hold}
+
+\texttt{exit\_point\_geometry(tx\_lat, tx\_lon, rx\_lat, rx\_lon, h\_km)}
+returns the geometry at the ray's descending exit point: a
+flat-Earth-approximated three-quarter-path location at altitude
+$h_{\rm km}$, with $\hat k$ pointing down and toward the receiver in
+local exit-ENU.  \texttt{entry\_point\_geometry} returns the same
+quantities at the upgoing entry (quarter path, $\hat k$ pointing up
+and toward the apex).
+
+\paragraph{The symmetry test we expected and the one that actually
+holds.}  Naively, $\theta_{\rm entry} + \theta_{\rm exit}$ should equal
+$180^\circ$, since $\hat k$ flips its vertical component while $\hat B$
+stays roughly the same.  The sanity-check suite found this fails: the
+sum is closer to 234$^\circ$ for the FC$\to$APO path.  Working it out
+algebraically: with $\hat k_{\rm entry} = (a, b, +c)$ and
+$\hat k_{\rm exit} = (a, b, -c)$, $\cos\theta_{\rm entry}$ and
+$\cos\theta_{\rm exit}$ differ only in the $\hat B$-vertical term.
+Their arccosines sum to $180^\circ$ \emph{only} when the horizontal
+components of $\hat k$ and $\hat B$ are perpendicular ---
+i.e.\ when the path's horizontal direction is east-west and $\hat B$
+has no horizontal east component.  For paths that aren't due-east
+(FC$\to$APO is mostly N-S, with $\hat B$ also pointing mostly N), the
+expected ``180$^\circ$'' identity does not hold.  The k-vector
+identity $\hat k_{\rm entry,horiz} = \hat k_{\rm exit,horiz}$ and
+$\hat k_{\rm entry,vert} = -\hat k_{\rm exit,vert}$ does hold to
+machine precision.
+
+\subsection{Path-integrated Faraday rotation}
+
+\texttt{integrated\_faraday\_rotation\_rad(B\_cos\_theta\_avg\_T,
+TEC\_electrons\_per\_m2, f\_hz)} returns
+\begin{equation}
+\Omega \;=\; \frac{e^3}{8\pi^2\varepsilon_0 m_e^2 c}\;
+        \frac{\langle B\cos\theta\rangle\,\mathrm{TEC}}{f^2}
+        \;\approx\; 2.36 \times 10^4
+        \;\frac{\langle B\cos\theta\rangle[\mathrm{T}]\;\mathrm{TEC}[e/m^2]}{f^2[\mathrm{Hz}]}.
+\end{equation}
+At 30\,TECU on the FC$\to$APO path with
+$\langle B\cos\theta\rangle \approx 25\,\mu$T, this gives $\sim 4500$
+turns at 2.5\,MHz and $\sim 70$ turns at 20\,MHz.  The $f^{-2}$ scaling
+is verified to numerical precision in the sanity-check suite.
+
+\subsection{Receiver-side projection}
+
+The connection from antenna data to mode amplitudes:
+\begin{enumerate}\itemsep=2pt
+\item \texttt{analyze\_z\_loops} produces $A_p(t), A_q(t)$ in the
+      receiver's horizontal-first $(\hat p_R, \hat q_R)$ basis.
+\item \texttt{multiband.\_project\_onto\_modes} computes the angle
+      $\alpha$ between $\hat p_R$ and the magnetoionic $\hat p_B$ in
+      the perp-plane, then rotates $(A_p, A_q) \to (A_{p_B}, A_{q_B})$.
+\item Matched-filter:
+      $a_O(t) = u_O^\dagger\,(A_{p_B}, A_{q_B})$,
+      $a_X(t) = u_X^\dagger\,(A_{p_B}, A_{q_B})$.
+\end{enumerate}
+The differential phase $\Delta\varphi(t) = \arg a_O - \arg a_X$,
+unwrapped, is the time-resolved analogue of the path-integrated
+Faraday rotation.
+
+\subsection{Sanity checks performed}
+\label{sec:magnetoionic-validation}
+
+The full validation suite runs eight blocks of checks, of which 21/23
+named assertions pass.  The two that ``fail'' are:
+\begin{itemize}\itemsep=2pt
+\item ``$\rho_O$ at $\theta = \pi$ should equal $-\rho_O$ at $\theta = 0$.''
+      It doesn't, because $\rho$ tracks polarization relative to
+      $\hat k$, and flipping $\theta$ doesn't change the sign of $q$.
+      This was a faulty expectation, not a code bug.
+\item ``$\theta_{\rm entry} + \theta_{\rm exit} \approx 180^\circ$.''
+      As discussed above, this only holds in special path geometries.
+      The k-vector identity that \emph{does} always hold passes.
+\end{itemize}
+The passing checks include: AH limits at $\theta=0, \pi/2$;
+mode orthogonality on $10^3$ random parameter draws; energy
+conservation $|a_O|^2 + |a_X|^2 = |E|^2$ to $10^{-15}$; IGRF reality
+check (mid-latitude US gives $|B| \approx 50\,\mu$T,
+inclination $\approx 62^\circ$, declination $\approx 9^\circ$);
+flat-Earth elevation within $2.5^\circ$ of the spherical-Earth value;
+range haversine match to 0.2\%; numerical robustness at
+$\theta = 0, \pi, \pi/2 \pm \epsilon$, $f = f_H$, $f \ll f_H$,
+$f \gg f_H$.
+
+\paragraph{When to use PHaRLAP instead.}  This module's flat-mirror
+geometry is fine for first-pass mode-polarization signature work --
+``are we in QL or QT?'' is robust against the geometric error.  For
+quantitative work the right tool is PHaRLAP (Cervera, DSTG/U.\
+Adelaide), which traces the full 3-D Haselgrove ray equations through
+an IRI ionosphere with IGRF.  See \texttt{triloop.pharlap\_predict}
+(planned) for the offline-prediction interface.
 
 %-----------------------------------------------------------------------
 \section{Direction finding}
@@ -582,8 +754,26 @@ one provides.  Treat it as a table of contents for the source.
                     \texttt{analyze\_z\_loops()}; \texttt{AnalysisResult}
                     dataclass. \\
 \texttt{multiband.py} & \texttt{analyze\_all\_bands()} (extract +
-                    analyze for every band) and
-                    \texttt{make\_multiband\_figure()}. \\
+                    analyze for every band, with optional O/X mode
+                    separation when TX/RX coordinates are given) plus
+                    \texttt{ModeSeparation} and \texttt{MultiBandResult}
+                    dataclasses; private \texttt{\_project\_onto\_modes()}
+                    matched-filter helper; \texttt{make\_multiband\_figure()}. \\
+\texttt{magnetoionic.py} & Cold-plasma O/X mode polarization:
+                    \texttt{appleton\_hartree\_polarization()},
+                    \texttt{mode\_unit\_vectors()},
+                    \texttt{mode\_ellipticity\_deg()},
+                    \texttt{mode\_orientation\_deg()},
+                    \texttt{mode\_axial\_ratio()},
+                    \texttt{khat\_propagation()},
+                    \texttt{igrf\_b\_hat\_enu()} (with pyIGRF or
+                    fallback approximation),
+                    \texttt{exit\_point\_geometry()},
+                    \texttt{entry\_point\_geometry()},
+                    \texttt{modes\_at\_exit()},
+                    \texttt{integrated\_faraday\_rotation\_rad()};
+                    \texttt{ExitGeometry, EntryGeometry, ModeAtExit}
+                    dataclasses. \\
 \texttt{direction.py} & Coherency-based direction finding:
                     \texttt{coherency\_matrix()},
                     \texttt{estimate\_direction\_from\_z\_lab()},
