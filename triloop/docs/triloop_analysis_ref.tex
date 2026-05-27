@@ -583,16 +583,28 @@ transmitter at Fort Collins, CO ($40.68^\circ$\,N, $-105.04^\circ$\,W).
 $\theta_{\rm exit} = 70^\circ$, ray elevation at RX is $27.1^\circ$
 (spherical) / $29.6^\circ$ (flat-Earth), great-circle bearing
 $4.3^\circ$ (effectively due N).  Mode axial ratio runs from 0.52 at
-2.5\,MHz to 0.92 at 20\,MHz --- modes are moderately linear at low
-$f$ and near-circular at high $f$.
+2.5\,MHz to 0.93 at 25\,MHz --- modes are moderately linear at low
+$f$ and near-circular at high $f$.  Cross-pol discrimination grows
+from +10\,dB at 2.5\,MHz to +29\,dB at 25\,MHz.
 
 \paragraph{FC $\to$ Boston (Harvard, 2812\,km, 2-hop).}
 Last-hop range $1406$\,km, $\theta_{\rm exit} = 55^\circ$, ray
 elevation at RX is $16.0^\circ$ (spherical) / $19.6^\circ$
 (flat-Earth), great-circle bearing $277.7^\circ$ (effectively due W).
-Mode axial ratio runs from 0.72 at 2.5\,MHz to 0.96 at 20\,MHz ---
+Mode axial ratio runs from 0.72 at 2.5\,MHz to 0.97 at 25\,MHz ---
 the smaller exit-point $\theta$ pushes the modes more circular than
-APO at every band.
+APO at every band.  XPD reaches $+25$\,dB by 5\,MHz vs.\ 10\,MHz at APO.
+
+\paragraph{Geometric AR is not the RCP/LCP energy split.}  The
+$P_{\rm dom}/P_{\rm tot}$ column in the user-manual tables uses the
+identity $P_{\rm dom}/P_{\rm tot} = (1+r)^2/(2(1+r^2))$ for axial
+ratio $r$.  The relationship is quadratic:  axial ratio 0.5 (visually
+``moderately linear'') gives a 90\,\%/10\,\% split, not 50\,\%/50\,\%.
+The helper \texttt{circular\_energy\_fractions(axial\_ratio)} returns
+the pair, and \texttt{cross\_pol\_discrimination\_db(axial\_ratio)}
+returns the dB ratio, useful for receiver design or for predicting
+how much power a circular-only antenna will couple from a given
+band.
 
 The user manual's \S Worked paths gives the full 5-band tables.
 Reproduce them via:
@@ -818,6 +830,9 @@ one provides.  Treat it as a table of contents for the source.
                     \texttt{mode\_ellipticity\_deg()},
                     \texttt{mode\_orientation\_deg()},
                     \texttt{mode\_axial\_ratio()},
+                    \texttt{circular\_energy\_fractions()} (RCP/LCP
+                    energy split from axial ratio),
+                    \texttt{cross\_pol\_discrimination\_db()},
                     \texttt{khat\_propagation()},
                     \texttt{igrf\_b\_hat\_enu()} (with pyIGRF or
                     fallback approximation),

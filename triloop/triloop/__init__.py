@@ -15,6 +15,7 @@ from .multiband import (
 from .magnetoionic import (
     appleton_hartree_polarization, mode_unit_vectors,
     mode_ellipticity_deg, mode_orientation_deg, mode_axial_ratio,
+    circular_energy_fractions, cross_pol_discrimination_db,
     exit_point_geometry, entry_point_geometry, modes_at_exit,
     multi_hop_geometry, gc_intermediate_point,
     haversine_km, initial_bearing_deg, spherical_elevation_at_rx_deg,
@@ -58,6 +59,8 @@ __all__ = [
     "mode_ellipticity_deg",
     "mode_orientation_deg",
     "mode_axial_ratio",
+    "circular_energy_fractions",
+    "cross_pol_discrimination_db",
     "exit_point_geometry",
     "entry_point_geometry",
     "modes_at_exit",

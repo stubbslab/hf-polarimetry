@@ -821,21 +821,28 @@ $|B|$ at exit / $f_H$       & 50 µT / 1.40 MHz \\\bottomrule
 \end{table}
 
 \begin{table}[h]\centering
-\begin{tabular}{ccccccl}
+\small
+\begin{tabular}{cccccccc}
 \toprule
-$f$ (MHz) & $Y\!=\!f_H/f$ & $q$ & axial ratio & $\chi_O$ & $\chi_X$ & character \\\midrule
- 2.5  & 0.56 & 0.71 & 0.52 & $+27^\circ$ & $-27^\circ$ & moderately linear \\
- 5.0  & 0.28 & 0.35 & 0.71 & $+35^\circ$ & $-35^\circ$ & elliptical        \\
-10.0  & 0.14 & 0.18 & 0.84 & $+40^\circ$ & $-40^\circ$ & elliptical        \\
-15.0  & 0.09 & 0.12 & 0.89 & $+42^\circ$ & $-42^\circ$ & near-circular     \\
-20.0  & 0.07 & 0.09 & 0.92 & $+43^\circ$ & $-43^\circ$ & near-circular     \\
+$f$ (MHz) & $Y$ & $q$ & axial ratio & $\chi_O$ & $P_{\rm dom}$ & $P_{\rm other}$ & XPD (dB) \\
+\midrule
+ 2.5  & 0.56 & 0.71 & 0.518 & $+27^\circ$ & 90.8\,\% & 9.16\,\%  & +10.0 \\
+ 5.0  & 0.28 & 0.35 & 0.707 & $+35^\circ$ & 97.1\,\% & 2.85\,\%  & +15.3 \\
+10.0  & 0.14 & 0.18 & 0.839 & $+40^\circ$ & 99.2\,\% & 0.76\,\%  & +21.1 \\
+15.0  & 0.09 & 0.12 & 0.889 & $+42^\circ$ & 99.7\,\% & 0.34\,\%  & +24.6 \\
+20.0  & 0.07 & 0.09 & 0.916 & $+42^\circ$ & 99.8\,\% & 0.19\,\%  & +27.1 \\
+25.0  & 0.06 & 0.07 & 0.932 & $+43^\circ$ & 99.9\,\% & 0.12\,\%  & +29.1 \\
 \bottomrule
 \end{tabular}
 \caption{Mode polarization at the descending exit point for FC $\to$
-APO. $Y \equiv f_H/f$, $q \equiv Y_T^2/(2 Y_L)$.  Both modes share
-the same axial ratio; the X mode's major axis is rotated 90$^\circ$
-from the O mode's (which lies along the projection of $\hat B$ onto
-the perp-plane).}
+APO.  $Y \equiv f_H/f$, $q \equiv Y_T^2/(2 Y_L)$, axial ratio is
+$|b/a|$ for either mode (both share the same value), and
+$\chi_O$ is the O mode's ellipticity angle.
+$P_{\rm dom}$ and $P_{\rm other}$ are the energy fractions of the
+two circular components (RCP/LCP about $\hat k$); for the O mode
+the dominant component is RCP, for the X mode it is LCP.
+``XPD'' (cross-pol discrimination) is
+$10\log_{10}(P_{\rm dom}/P_{\rm other})$.}
 \end{table}
 
 \paragraph{2.  FC $\to$ Boston (Harvard, $42.37^\circ$\,N,
@@ -865,19 +872,45 @@ $|B|$ at exit / $f_H$            & 50 µT / 1.40 MHz   \\\bottomrule
 \end{table}
 
 \begin{table}[h]\centering
-\begin{tabular}{ccccccl}
+\small
+\begin{tabular}{cccccccc}
 \toprule
-$f$ (MHz) & $Y\!=\!f_H/f$ & $q$ & axial ratio & $\chi_O$ & $\chi_X$ & character \\\midrule
- 2.5  & 0.56 & 0.33 & 0.72 & $+36^\circ$ & $-36^\circ$ & elliptical    \\
- 5.0  & 0.28 & 0.16 & 0.85 & $+40^\circ$ & $-40^\circ$ & elliptical    \\
-10.0  & 0.14 & 0.08 & 0.92 & $+43^\circ$ & $-43^\circ$ & near-circular \\
-15.0  & 0.09 & 0.06 & 0.95 & $+43^\circ$ & $-43^\circ$ & near-circular \\
-20.0  & 0.07 & 0.04 & 0.96 & $+44^\circ$ & $-44^\circ$ & near-circular \\
+$f$ (MHz) & $Y$ & $q$ & axial ratio & $\chi_O$ & $P_{\rm dom}$ & $P_{\rm other}$ & XPD (dB) \\
+\midrule
+ 2.5  & 0.56 & 0.33 & 0.723 & $+36^\circ$ & 97.5\,\%  & 2.52\,\%   & +15.9 \\
+ 5.0  & 0.28 & 0.16 & 0.848 & $+40^\circ$ & 99.3\,\%  & 0.67\,\%   & +21.7 \\
+10.0  & 0.14 & 0.08 & 0.921 & $+43^\circ$ & 99.83\,\% & 0.17\,\%   & +27.7 \\
+15.0  & 0.09 & 0.06 & 0.946 & $+43^\circ$ & 99.92\,\% & 0.08\,\%   & +31.2 \\
+20.0  & 0.07 & 0.04 & 0.960 & $+44^\circ$ & 99.96\,\% & 0.04\,\%   & +33.7 \\
+25.0  & 0.06 & 0.03 & 0.968 & $+44^\circ$ & 99.97\,\% & 0.03\,\%   & +35.6 \\
 \bottomrule
 \end{tabular}
 \caption{Mode polarization at the descending exit point for the last
-hop of FC $\to$ Boston.}
+hop of FC $\to$ Boston.  Columns as in the FC $\to$ APO table.}
 \end{table}
+
+\paragraph{Practical reading of the energy-fraction columns.}
+The geometric ``axial ratio'' tells you the shape of the polarization
+ellipse, but the ratio at which the two circular handednesses split
+the wave's power is the \emph{quadratic} formula
+\[
+\frac{P_{\rm dom}}{P_{\rm total}} = \frac{(1+r)^2}{2(1+r^2)},
+\qquad
+\frac{P_{\rm other}}{P_{\rm total}} = \frac{(1-r)^2}{2(1+r^2)},
+\]
+in
+\texttt{triloop.circular\_energy\_fractions}.  Two takeaways:
+\begin{itemize}\itemsep=2pt
+\item Even at the most ``linear-looking'' case
+      (FC $\to$ APO at 2.5\,MHz, axial ratio 0.52), 91\,\% of the
+      power is in one circular handedness.  The visual impression
+      ``looks pretty linear'' does \emph{not} mean ``50/50 RCP/LCP''.
+\item Cross-polarization discrimination (XPD) tracks the dB scale of
+      the small wrong-handed term and is the relevant figure of
+      merit for polarization-discrimination receivers.  Boston
+      reaches $\geq 25$\,dB XPD by 5\,MHz; APO requires 10\,MHz to
+      hit the same level.
+\end{itemize}
 
 \paragraph{Key contrasts.}
 \begin{itemize}\itemsep=2pt

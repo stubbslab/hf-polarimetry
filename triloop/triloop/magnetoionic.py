@@ -119,6 +119,51 @@ def mode_orientation_deg(rho: complex) -> float:
     return float(np.degrees(0.5 * np.arctan2(num, den)))
 
 
+def circular_energy_fractions(axial_ratio: float) -> Tuple[float, float]:
+    """Decompose a fully polarized elliptical wave into RCP+LCP energy
+    fractions, given the (signed) axial ratio b/a in [-1, 1] or
+    magnitude in [0, 1].
+
+    For a fully polarised wave with major-axis amplitude a and
+    minor-axis amplitude |b| (so axial ratio r = |b|/a), the two
+    circular components carry
+
+        P_dominant / P_total = (1 + r)^2 / (2 (1 + r^2))
+        P_other     / P_total = (1 - r)^2 / (2 (1 + r^2))
+
+    where 'dominant' is the handedness of the wave's circular
+    component that matches the rotation sense of the ellipse and
+    'other' is the opposite handedness.  At r = 0 (linear) both
+    fractions are 1/2; at r = 1 (circular) the dominant fraction is
+    1 and the other is 0.
+
+    Parameters
+    ----------
+    axial_ratio : float in [0, 1] (or [-1, 1] for signed)
+
+    Returns
+    -------
+    (P_dom_frac, P_other_frac), both in [0, 1] and summing to 1.
+    """
+    r = abs(float(axial_ratio))
+    if r > 1.0:
+        # Use the conjugate ellipse if the user passed >1 by accident
+        r = 1.0 / r
+    denom = 2.0 * (1.0 + r * r)
+    P_dom = (1.0 + r) ** 2 / denom
+    P_other = (1.0 - r) ** 2 / denom
+    return float(P_dom), float(P_other)
+
+
+def cross_pol_discrimination_db(axial_ratio: float) -> float:
+    """Convenience: 10 log10(P_dom / P_other) in dB.  Returns +inf for
+    a perfect circular wave (axial_ratio = 1)."""
+    P_dom, P_other = circular_energy_fractions(axial_ratio)
+    if P_other <= 0.0:
+        return float("inf")
+    return float(10.0 * np.log10(P_dom / P_other))
+
+
 # ------------------------------------------------------------ geometry
 
 def khat_propagation(az_src_deg: float, el_src_deg: float) -> np.ndarray:
