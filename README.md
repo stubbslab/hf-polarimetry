@@ -168,10 +168,15 @@ hf-polarimetry/
 │   │   ├── draw_geometry.py
 │   │   └── visualize_sim.py
 │   └── three_loop_array_report.pdf      technical report on array design
-└── examples/
-    ├── example_5band_wwv.h5             58 MB synthetic capture
-    ├── example_5band_wwv_browse.html    pre-rendered interactive browser
-    └── make_example_capture.py          regenerate the example
+├── examples/
+│   ├── example_5band_wwv.h5             58 MB synthetic capture
+│   ├── example_5band_wwv_browse.html    pre-rendered interactive browser
+│   └── make_example_capture.py          regenerate the example
+└── tools/
+    ├── README.md
+    └── bodnar_gui.py                    Tkinter GUI for the Leo Bodnar
+                                          Dual GPSDO (the recommended
+                                          GPS-locked HF synthesizer)
 ```
 
 ## What's *not* in the repo
