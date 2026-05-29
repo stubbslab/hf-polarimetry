@@ -3,6 +3,39 @@
 Auxiliary utilities that don't belong inside the `picoacq` or `triloop`
 Python packages but are useful in the experimental workflow.
 
+## predict_phase.py
+
+Phase-prediction analysis on KiwiSDR IQ recordings of WWV (or any
+single-tone HF carrier in 2-channel int16 IQ format).
+
+```bash
+python3 tools/predict_phase.py path/to/wwv_iq.wav
+```
+
+Compares three predictors of the future phase track:
+- **constant-phase** (do-nothing baseline; this *is* the descriptive
+  $D(\tau)$ structure function),
+- **linear extrapolation** (least-squares fit on a moving 50 ms window,
+  extrapolated; nails out a constant Doppler shift),
+- **2-state Kalman filter** on $(\varphi, \omega)$ with tunable
+  process noise.
+
+For each predictor it computes the prediction-error structure function
+$D_{\rm pred}(\tau) = \langle [\varphi(t+\tau) - \hat\varphi(t+\tau\,|\,t)]^2\rangle$
+averaged across all high-SNR segments in the file, then plots
+$\sqrt{D_{\rm pred}(\tau)}$ for each predictor on the same axes.  An
+adaptive HF correction system's lower bound on closed-loop residual
+phase error is given by the optimum predictor.
+
+Output:  ``<input>_predict.png`` and ``<input>_predict.json`` next to
+the input file.
+
+Useful for comparing predictability across bands, between fades, or as
+the input model for a future closed-loop correction experiment.  Tune
+``--kalman-q-omega`` (default 1e3, but values in the range 1–100 often
+work better on long-coherent captures) and ``--linear-fit-window-s``
+(default 50 ms) to find the optimum for your data.
+
 ## bodnar_gui.py
 
 Tkinter GUI for the **Leo Bodnar Dual GPSDO** (the recommended GPS-locked
