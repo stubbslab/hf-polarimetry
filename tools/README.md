@@ -3,6 +3,32 @@
 Auxiliary utilities that don't belong inside the `picoacq` or `triloop`
 Python packages but are useful in the experimental workflow.
 
+## predict_phase_batch.py
+
+Batch driver that runs `predict_phase.compute_predictability` across an
+entire directory of KiwiSDR IQ recordings, parses each filename for
+date/time/freq/port, and produces:
+
+- `predict_phase_results.jsonl` — one record per file
+- `predict_phase_dpred20ms_vs_freq.png` — boxplot of `D_pred(20 ms)` per band
+- `predict_phase_dpred20ms_vs_hour.png` — median `D_pred(20 ms)` vs UTC hour
+- `predict_phase_correctable_fraction.png` — % of files achieving the
+  0.5 rad threshold per band
+
+```bash
+python3 tools/predict_phase_batch.py /path/to/wav_dir \
+    --pattern '*wwv*.wav' \
+    --workers 4 \
+    --out-dir /tmp/predict_batch_out
+```
+
+The Kalman predictor is skipped by default (slow); pass `--with-kalman`
+to enable it.  On constrained systems where `ProcessPoolExecutor` can't
+allocate semaphores, the driver falls back to a serial loop
+automatically.  Quality cut: files with per-segment slope std exceeding
+`--max-slope-std-hz` (default 5000 Hz) are excluded as having
+phase-unwrap failures rather than meaningful prediction signals.
+
 ## predict_phase.py
 
 Phase-prediction analysis on KiwiSDR IQ recordings of WWV (or any

@@ -79,16 +79,27 @@ def load_kiwi_iq_wav(path: str) -> Tuple[np.ndarray, float]:
 
 def find_carrier_freq(z: np.ndarray, sr: float,
                       drop_first_s: float = 1.0,
-                      search_lo: float = 1500.0,
-                      search_hi: float = 2500.0) -> float:
-    """FFT-based search for the dominant tone in |f| ∈ [lo, hi].
-    Allows the carrier to appear at either positive OR negative f
-    (Kiwi detuning convention varies)."""
+                      search_lo: float = 500.0,
+                      search_hi: float = 4500.0,
+                      n_iter: int = 3) -> float:
+    """Robust sub-Hz carrier (beat-tone) finder for Kiwi IQ data.
+
+    1. Coarse FFT peak search in |f| ∈ [search_lo, search_hi] Hz.
+       Handles both positive and negative offsets (Kiwi detuning
+       convention varies).
+    2. Iterative refinement: mix to baseband at the current estimate,
+       low-pass to ±200 Hz, fit residual phase slope, update estimate.
+       Converges to sub-Hz accuracy in 3 passes.
+
+    Adapted from wwv_phase_analysis_final.find_carrier_frequency().
+    """
     head = int(drop_first_s * sr)
-    z = z[head:]
+    z_active = z[head:]
+
+    # Coarse FFT peak
     n_fft = 1 << 18
-    n_fft = min(n_fft, z.size)
-    Z = np.fft.fft(z[:n_fft])
+    n_fft = min(n_fft, z_active.size)
+    Z = np.fft.fft(z_active[:n_fft])
     f = np.fft.fftfreq(n_fft, 1.0 / sr)
     mag = np.abs(Z)
     mask = (np.abs(f) >= search_lo) & (np.abs(f) <= search_hi)
@@ -96,7 +107,28 @@ def find_carrier_freq(z: np.ndarray, sr: float,
         raise RuntimeError(
             f"no FFT bins in search window |f|∈[{search_lo},{search_hi}] Hz")
     idxs = np.flatnonzero(mask)
-    return float(f[idxs[np.argmax(mag[idxs])]])
+    f_est = float(f[idxs[np.argmax(mag[idxs])]])
+
+    # Iterative refinement via residual-phase-slope tracking on the
+    # whole file.  Fades cause some bias on heavily-faded captures, but
+    # the linear and Kalman predictors handle a constant residual
+    # offset internally, so a small bias here is fine.
+    try:
+        from scipy.signal import butter, filtfilt
+        b, a = butter(4, 200.0 / (sr / 2), btype="low")
+        have_scipy = True
+    except ImportError:
+        have_scipy = False
+
+    t = np.arange(z_active.size) / sr
+    for _ in range(n_iter):
+        z_bb = z_active * np.exp(-1j * 2 * np.pi * f_est * t)
+        if have_scipy:
+            z_bb = filtfilt(b, a, z_bb)
+        phase = np.unwrap(np.angle(z_bb))
+        slope, _ = np.polyfit(t, phase, 1)
+        f_est += slope / (2 * np.pi)
+    return f_est
 
 
 def mix_to_dc(z: np.ndarray, sr: float, f_carrier: float) -> np.ndarray:
@@ -331,6 +363,118 @@ def descriptive_structure_function(phi: np.ndarray, sr: float,
     return out
 
 
+# --------------------------------------------------- programmatic entry
+
+def compute_predictability(path: str, *,
+                           taus_s: Optional[np.ndarray] = None,
+                           min_segment_s: float = 0.5,
+                           amp_quantile: float = 0.5,
+                           amp_rel_var_max: float = 0.5,
+                           amp_smooth_s: float = 0.1,
+                           linear_fit_window_s: float = 0.05,
+                           kalman_q_omega: float = 1.0,
+                           skip_kalman: bool = False,
+                           carrier_search_lo: float = 500.0,
+                           carrier_search_hi: float = 4500.0,
+                           ) -> dict:
+    """Run the full prediction pipeline on one file and return a
+    summary dict.  No plotting, no JSON write.  For batch use.
+
+    Returns a dict with keys:
+        sample_rate_Hz, carrier_beat_Hz, n_segments, total_duration_s,
+        carrier_slope_std_Hz, taus_s, rms_pred_constant_rad,
+        rms_pred_linear_rad, rms_pred_kalman_rad, rms_descriptive_rad,
+        median_amp.
+    Returns ``{"error": "..."}`` if processing fails.
+    """
+    if taus_s is None:
+        taus_s = np.geomspace(1e-3, 0.2, 25)
+    try:
+        z, sr = load_kiwi_iq_wav(path)
+        if z.size < int(5 * sr):
+            return {"error": f"file too short ({z.size/sr:.1f}s)"}
+        f_c = find_carrier_freq(z, sr,
+                                search_lo=carrier_search_lo,
+                                search_hi=carrier_search_hi)
+        z_dc = mix_to_dc(z, sr, f_c)
+        A, _ = amplitude_phase(z_dc)
+        segs = find_high_snr_segments(
+            A, sr, min_duration_s=min_segment_s,
+            amp_threshold_quantile=amp_quantile,
+            amp_relative_var_max=amp_rel_var_max,
+            smooth_s=amp_smooth_s)
+        if not segs:
+            return {"error": "no high-SNR segments"}
+
+        n_tau = taus_s.size
+        Dpred_const  = np.zeros(n_tau)
+        Dpred_linear = np.zeros(n_tau)
+        Dpred_kalman = np.zeros(n_tau)
+        Ddesc        = np.zeros(n_tau)
+        weight       = np.zeros(n_tau)
+        slopes_hz = []
+        for s in segs:
+            z_dc_seg = z_dc[s.i_start:s.i_end]
+            phi_s = np.unwrap(np.angle(z_dc_seg)).astype(np.float64)
+            t_seg = np.arange(phi_s.size) / sr
+            slope_rad_s, _ = np.polyfit(t_seg, phi_s, 1)
+            slopes_hz.append(float(slope_rad_s) / (2 * np.pi))
+            n_s = phi_s.size
+            dD_const  = predict_constant(phi_s, sr, taus_s)
+            dD_lin    = predict_linear(phi_s, sr, taus_s,
+                                        fit_window_s=linear_fit_window_s)
+            if skip_kalman:
+                dD_kal = np.full_like(taus_s, np.nan, dtype=np.float64)
+            else:
+                dD_kal = predict_kalman(phi_s, sr, taus_s,
+                                        q_omega=kalman_q_omega)
+            dD_desc   = descriptive_structure_function(phi_s, sr, taus_s)
+            m = int(round(taus_s[-1] * sr))
+            n_eff = max(n_s - m, 0)
+            for arr, dst in [(dD_const, Dpred_const),
+                             (dD_lin,   Dpred_linear),
+                             (dD_kal,   Dpred_kalman),
+                             (dD_desc,  Ddesc)]:
+                ok = np.isfinite(arr)
+                dst[ok] += arr[ok] * n_eff
+            weight += n_eff * np.isfinite(dD_const)
+
+        weight = np.where(weight > 0, weight, np.nan)
+        rms_const  = np.sqrt(Dpred_const  / weight)
+        rms_linear = np.sqrt(Dpred_linear / weight)
+        rms_kalman = np.sqrt(Dpred_kalman / weight)
+        rms_desc   = np.sqrt(Ddesc        / weight)
+
+        # Carrier-quality metrics: prefer the dispersion of per-segment
+        # slopes if there are multiple segments; otherwise fall back to
+        # the absolute slope magnitude (which should be sub-Hz for a
+        # well-locked carrier on a real WWV recording).
+        slopes_arr = np.array(slopes_hz)
+        if slopes_arr.size >= 2:
+            slope_std = float(slopes_arr.std())
+        elif slopes_arr.size == 1:
+            slope_std = float(abs(slopes_arr[0]))
+        else:
+            slope_std = None
+        return dict(
+            sample_rate_Hz=float(sr),
+            carrier_beat_Hz=float(f_c),
+            n_segments=len(segs),
+            total_duration_s=float(sum(s.duration_s for s in segs)),
+            per_segment_slope_mean_Hz=float(slopes_arr.mean()) if slopes_arr.size else None,
+            per_segment_slope_max_abs_Hz=float(np.abs(slopes_arr).max()) if slopes_arr.size else None,
+            carrier_slope_std_Hz=slope_std,
+            median_amp=float(np.median(A)),
+            taus_s=taus_s.tolist(),
+            rms_pred_constant_rad=rms_const.tolist(),
+            rms_pred_linear_rad=rms_linear.tolist(),
+            rms_pred_kalman_rad=rms_kalman.tolist(),
+            rms_descriptive_rad=rms_desc.tolist(),
+        )
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 # ------------------------------------------------------------------ main
 
 def main():
@@ -456,12 +600,20 @@ def main():
     rms_kalman = np.sqrt(Dpred_kalman)
     rms_desc   = np.sqrt(Ddesc)
 
+    carrier_quality = None
     if per_segment_slopes_hz:
         slopes = np.array(per_segment_slopes_hz)
+        slope_std = float(slopes.std())
+        carrier_quality = slope_std
         print(f"\nPer-segment phase slopes (residual carrier in Hz):")
-        print(f"  mean {slopes.mean():+.4f} ± {slopes.std():.4f} Hz "
+        print(f"  mean {slopes.mean():+.4f} ± {slope_std:.4f} Hz "
               f"(median {np.median(slopes):+.4f}, range "
               f"{slopes.min():+.4f} … {slopes.max():+.4f})")
+        if slope_std > 5.0:
+            print(f"  WARNING: per-segment slopes vary by "
+                  f"{slope_std:.1f} Hz; carrier identification is "
+                  f"unreliable on this file (likely AM sideband "
+                  f"contamination).  Predictor results are suspect.")
     print("\nRMS prediction error (rad) at selected lookaheads:")
     print(f"  {'tau (ms)':>8}  {'const':>8}  {'linear':>8}  {'kalman':>8}  "
           f"{'D(tau)':>8}")
@@ -508,6 +660,7 @@ def main():
         "sample_rate_Hz": sr,
         "carrier_beat_Hz": f_c,
         "per_segment_slopes_Hz": per_segment_slopes_hz,
+        "carrier_slope_std_Hz": carrier_quality,
         "n_segments": len(segs),
         "total_duration_s": float(sum(s.duration_s for s in segs)),
         "linear_fit_window_s": args.linear_fit_window_s,
