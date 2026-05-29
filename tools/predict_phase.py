@@ -137,11 +137,118 @@ def mix_to_dc(z: np.ndarray, sr: float, f_carrier: float) -> np.ndarray:
     return (z * np.exp(-1j * 2 * np.pi * f_carrier * t)).astype(np.complex64)
 
 
+def lowpass_complex(z_dc: np.ndarray, sr: float,
+                    cutoff_hz: float = 200.0,
+                    order: int = 6) -> np.ndarray:
+    """Brick-wall-ish low-pass filter (zero-phase Butterworth via
+    filtfilt) on a complex baseband signal.  cutoff_hz is the one-sided
+    cutoff: a 200 Hz value keeps ±200 Hz around DC, total noise
+    bandwidth 400 Hz.
+
+    For a Kiwi 20 kHz IQ recording at SNR-limited HF carriers, this
+    gain matters a lot: noise variance scales as bandwidth, so going
+    from 20 kHz to 400 Hz reduces phase-tracker noise by ~50× in
+    variance (~7× in RMS).  For ionospheric phase work we want the
+    narrowest filter that still passes the slow phase fluctuations
+    we're trying to predict (well below 100 Hz).
+    """
+    try:
+        from scipy.signal import butter, filtfilt
+    except ImportError:
+        # No scipy -> graceful fallback to FFT brick-wall
+        n = z_dc.size
+        Z = np.fft.fft(z_dc)
+        f = np.fft.fftfreq(n, 1.0 / sr)
+        Z[np.abs(f) > cutoff_hz] = 0.0
+        return np.fft.ifft(Z).astype(np.complex64)
+    nyq = sr / 2.0
+    wn = cutoff_hz / nyq
+    if wn >= 1.0:
+        return z_dc
+    b, a = butter(order, wn, btype="low")
+    # Filter real and imaginary parts separately (filtfilt is real-only)
+    fr = filtfilt(b, a, z_dc.real)
+    fi = filtfilt(b, a, z_dc.imag)
+    return (fr + 1j * fi).astype(np.complex64)
+
+
 def amplitude_phase(z_dc: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Magnitude (linear) and unwrapped phase (radians) of complex z_dc."""
     A = np.abs(z_dc).astype(np.float32)
     phi = np.unwrap(np.angle(z_dc)).astype(np.float64)
     return A, phi
+
+
+# Defaults adopted from wwv_phase_analysis_final.py
+SNR_THRESHOLD_DB = 12.0
+PHASE_JUMP_THRESHOLD_RAD = 1.5
+FADE_MARGIN_SAMPLES = 100
+
+
+def detect_fades(amplitude: np.ndarray, sr: float,
+                 threshold_db: float = SNR_THRESHOLD_DB,
+                 margin_samples: int = FADE_MARGIN_SAMPLES
+                 ) -> np.ndarray:
+    """Boolean mask, True where signal is in a fade.  Threshold is
+    set ``threshold_db`` below the 90th-percentile amplitude (a robust
+    proxy for the unfaded carrier level).  Detected fades are then
+    dilated by ``margin_samples`` on each side to cover edge effects
+    around the fade boundary."""
+    amp_db = 20.0 * np.log10(amplitude + 1e-12)
+    ref_db = np.percentile(amp_db, 90)
+    is_faded = amp_db < (ref_db - threshold_db)
+    if margin_samples <= 0:
+        return is_faded.astype(bool)
+    # Dilate via a uniform-window max filter
+    n = is_faded.size
+    out = np.zeros(n, dtype=bool)
+    starts = np.flatnonzero(np.diff(np.concatenate([[0],
+                                                     is_faded.astype(int)])) == 1)
+    ends   = np.flatnonzero(np.diff(np.concatenate([is_faded.astype(int),
+                                                     [0]])) == -1) + 1
+    if is_faded[0]:
+        starts = np.concatenate([[0], starts])
+    if is_faded[-1] and len(ends) == 0:
+        ends = np.array([n])
+    for s, e in zip(starts, ends):
+        out[max(0, s - margin_samples):min(n, e + margin_samples)] = True
+    return out
+
+
+def splice_phase(phase: np.ndarray, fade_mask: np.ndarray,
+                 jump_threshold_rad: float = PHASE_JUMP_THRESHOLD_RAD
+                 ) -> Tuple[np.ndarray, int]:
+    """Remove fade-induced phase discontinuities.
+
+    When the signal fades out the phase-locked-loop / unwrap loses
+    track and on recovery picks up an arbitrary integer-2π offset.
+    These discontinuities corrupt the structure-function and
+    predictor outputs.  Walking the time series from start to end:
+    when we exit a fade region with a large jump from the last valid
+    sample, subtract that jump from the entire remainder of the trace.
+
+    Returns (spliced_phase, n_splices_applied).  Ported from
+    wwv_phase_analysis_final.splice_phase."""
+    phase_out = np.copy(phase)
+    n = phase_out.size
+    # Identify exit-from-fade transitions
+    fm = fade_mask.astype(int)
+    exits = np.flatnonzero(np.diff(fm) == -1) + 1   # index into phase
+    n_splices = 0
+    for idx in exits:
+        if idx < 10 or idx >= n - 10:
+            continue
+        # find last valid sample BEFORE the fade we just exited
+        pre = idx - 1
+        while pre > 0 and fade_mask[pre]:
+            pre -= 1
+        if pre <= 0:
+            continue
+        jump = phase_out[idx] - phase_out[pre]
+        if abs(jump) > jump_threshold_rad:
+            phase_out[idx:] -= jump
+            n_splices += 1
+    return phase_out, n_splices
 
 
 def detrend_linear(t: np.ndarray, phi: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -367,10 +474,10 @@ def descriptive_structure_function(phi: np.ndarray, sr: float,
 
 def compute_predictability(path: str, *,
                            taus_s: Optional[np.ndarray] = None,
-                           min_segment_s: float = 0.5,
-                           amp_quantile: float = 0.5,
-                           amp_rel_var_max: float = 0.5,
-                           amp_smooth_s: float = 0.1,
+                           bandwidth_hz: float = 200.0,
+                           snr_fade_db: float = SNR_THRESHOLD_DB,
+                           fade_margin_samples: int = FADE_MARGIN_SAMPLES,
+                           phase_jump_threshold_rad: float = PHASE_JUMP_THRESHOLD_RAD,
                            linear_fit_window_s: float = 0.05,
                            kalman_q_omega: float = 1.0,
                            skip_kalman: bool = False,
@@ -378,14 +485,24 @@ def compute_predictability(path: str, *,
                            carrier_search_hi: float = 4500.0,
                            ) -> dict:
     """Run the full prediction pipeline on one file and return a
-    summary dict.  No plotting, no JSON write.  For batch use.
+    summary dict.
 
-    Returns a dict with keys:
-        sample_rate_Hz, carrier_beat_Hz, n_segments, total_duration_s,
-        carrier_slope_std_Hz, taus_s, rms_pred_constant_rad,
-        rms_pred_linear_rad, rms_pred_kalman_rad, rms_descriptive_rad,
-        median_amp.
-    Returns ``{"error": "..."}`` if processing fails.
+    Pipeline (whole-file, post-splice):
+      1. FFT-search the carrier within |f| ∈ [search_lo, search_hi].
+      2. Mix to DC; brick-wall-equivalent low-pass to ±bandwidth_hz
+         (default ±200 Hz to match the previous wwv_phase_analysis
+         work).  Reduces phase-tracker noise by 20kHz/2*bw vs the raw
+         signal, ~7× improvement in phase RMS for noise-limited cases.
+      3. Detect fades on the smoothed amplitude; expand by
+         ``fade_margin_samples``.
+      4. Unwrap the whole-file phase, then SPLICE across each fade
+         exit (subtract any jump > ``phase_jump_threshold_rad`` from
+         all subsequent samples).  This gives a continuous phase track.
+      5. Compute the predictors over the whole spliced track,
+         masking out samples inside fades from the prediction-error
+         averages (so deep-fade samples don't pollute the metric).
+
+    Returns a dict; on error, returns ``{"error": "..."}``.
     """
     if taus_s is None:
         taus_s = np.geomspace(1e-3, 0.2, 25)
@@ -393,77 +510,124 @@ def compute_predictability(path: str, *,
         z, sr = load_kiwi_iq_wav(path)
         if z.size < int(5 * sr):
             return {"error": f"file too short ({z.size/sr:.1f}s)"}
+
         f_c = find_carrier_freq(z, sr,
                                 search_lo=carrier_search_lo,
                                 search_hi=carrier_search_hi)
+        # 1. mix to DC
         z_dc = mix_to_dc(z, sr, f_c)
-        A, _ = amplitude_phase(z_dc)
-        segs = find_high_snr_segments(
-            A, sr, min_duration_s=min_segment_s,
-            amp_threshold_quantile=amp_quantile,
-            amp_relative_var_max=amp_rel_var_max,
-            smooth_s=amp_smooth_s)
-        if not segs:
-            return {"error": "no high-SNR segments"}
+        # 2. low-pass to ±bandwidth_hz around the carrier
+        if bandwidth_hz > 0 and bandwidth_hz < sr / 2:
+            z_dc = lowpass_complex(z_dc, sr, cutoff_hz=bandwidth_hz)
+        A = np.abs(z_dc).astype(np.float32)
 
-        n_tau = taus_s.size
-        Dpred_const  = np.zeros(n_tau)
-        Dpred_linear = np.zeros(n_tau)
-        Dpred_kalman = np.zeros(n_tau)
-        Ddesc        = np.zeros(n_tau)
-        weight       = np.zeros(n_tau)
-        slopes_hz = []
-        for s in segs:
-            z_dc_seg = z_dc[s.i_start:s.i_end]
-            phi_s = np.unwrap(np.angle(z_dc_seg)).astype(np.float64)
-            t_seg = np.arange(phi_s.size) / sr
-            slope_rad_s, _ = np.polyfit(t_seg, phi_s, 1)
-            slopes_hz.append(float(slope_rad_s) / (2 * np.pi))
-            n_s = phi_s.size
-            dD_const  = predict_constant(phi_s, sr, taus_s)
-            dD_lin    = predict_linear(phi_s, sr, taus_s,
-                                        fit_window_s=linear_fit_window_s)
-            if skip_kalman:
-                dD_kal = np.full_like(taus_s, np.nan, dtype=np.float64)
-            else:
-                dD_kal = predict_kalman(phi_s, sr, taus_s,
-                                        q_omega=kalman_q_omega)
-            dD_desc   = descriptive_structure_function(phi_s, sr, taus_s)
-            m = int(round(taus_s[-1] * sr))
-            n_eff = max(n_s - m, 0)
-            for arr, dst in [(dD_const, Dpred_const),
-                             (dD_lin,   Dpred_linear),
-                             (dD_kal,   Dpred_kalman),
-                             (dD_desc,  Ddesc)]:
-                ok = np.isfinite(arr)
-                dst[ok] += arr[ok] * n_eff
-            weight += n_eff * np.isfinite(dD_const)
+        # 3. fade mask
+        fade_mask = detect_fades(A, sr, threshold_db=snr_fade_db,
+                                 margin_samples=fade_margin_samples)
+        n_total = z_dc.size
+        n_fade = int(fade_mask.sum())
+        good_frac = 1.0 - n_fade / n_total
+        if good_frac < 0.05:
+            return {"error": f"only {good_frac*100:.1f}% of file is unfaded"}
 
-        weight = np.where(weight > 0, weight, np.nan)
-        rms_const  = np.sqrt(Dpred_const  / weight)
-        rms_linear = np.sqrt(Dpred_linear / weight)
-        rms_kalman = np.sqrt(Dpred_kalman / weight)
-        rms_desc   = np.sqrt(Ddesc        / weight)
+        # 4. unwrap whole file then splice
+        phi_full = np.unwrap(np.angle(z_dc)).astype(np.float64)
+        phi_full, n_splices = splice_phase(
+            phi_full, fade_mask,
+            jump_threshold_rad=phase_jump_threshold_rad)
 
-        # Carrier-quality metrics: prefer the dispersion of per-segment
-        # slopes if there are multiple segments; otherwise fall back to
-        # the absolute slope magnitude (which should be sub-Hz for a
-        # well-locked carrier on a real WWV recording).
-        slopes_arr = np.array(slopes_hz)
-        if slopes_arr.size >= 2:
-            slope_std = float(slopes_arr.std())
-        elif slopes_arr.size == 1:
-            slope_std = float(abs(slopes_arr[0]))
+        # Residual carrier slope (post-splice) — measured over unfaded
+        # samples only, as a quality / Doppler diagnostic
+        good_idx = np.flatnonzero(~fade_mask)
+        if good_idx.size >= 100:
+            t_good = good_idx.astype(np.float64) / sr
+            slope_rad_s, _ = np.polyfit(t_good, phi_full[good_idx], 1)
+            residual_slope_hz = float(slope_rad_s) / (2 * np.pi)
         else:
-            slope_std = None
+            residual_slope_hz = float("nan")
+
+        # 5. predictors on the spliced full-file phase track, with
+        # the fade mask used to drop t-and-t+τ pairs whose endpoints
+        # land inside a fade.
+        n_tau = taus_s.size
+        Dpred_const  = np.full(n_tau, np.nan, dtype=np.float64)
+        Dpred_linear = np.full(n_tau, np.nan, dtype=np.float64)
+        Dpred_kalman = np.full(n_tau, np.nan, dtype=np.float64)
+        Ddesc        = np.full(n_tau, np.nan, dtype=np.float64)
+
+        valid = ~fade_mask
+        # constant-phase + descriptive structure function are the same
+        # quantity by construction (D_pred_const(tau) = <(phi(t+tau)-phi(t))^2>)
+        for k, tau in enumerate(taus_s):
+            m = int(round(tau * sr))
+            if m <= 0 or m >= n_total:
+                continue
+            pair_valid = valid[:n_total - m] & valid[m:]
+            if not np.any(pair_valid):
+                continue
+            d = phi_full[m:n_total] - phi_full[:n_total - m]
+            d = d[pair_valid]
+            mse = float(np.mean(d * d))
+            Dpred_const[k] = mse
+            Ddesc[k]        = mse
+
+        # linear extrapolation: vectorised running OLS on the
+        # spliced phase, evaluated only at unfaded prediction epochs
+        n_fit = int(round(linear_fit_window_s * sr))
+        if n_fit >= 8 and n_fit < n_total:
+            t_local = np.arange(n_fit, dtype=np.float64) / sr
+            x_mean = float(t_local.mean())
+            x_dev = t_local - x_mean
+            Sxx = float((x_dev * x_dev).sum())
+            kernel = np.ones(n_fit) / n_fit
+            phi_mean = np.convolve(phi_full, kernel, mode="valid")
+            cross = np.convolve(phi_full, x_dev[::-1], mode="valid")
+            slope_arr = cross / Sxx
+            t_end = t_local[-1]
+            phi_at_t0 = phi_mean + slope_arr * (t_end - x_mean)
+            base_idx = np.arange(slope_arr.size) + (n_fit - 1)
+            for k, tau in enumerate(taus_s):
+                m = int(round(tau * sr))
+                if m <= 0:
+                    continue
+                target_ix = base_idx + m
+                in_range = target_ix < n_total
+                if not np.any(in_range):
+                    continue
+                ti = target_ix[in_range]
+                bi = base_idx[in_range]
+                # Both t0 and t0+tau must be in unfaded sections, AND
+                # the entire fit window [t0-fit_window, t0] should be
+                # mostly unfaded so the slope estimate is meaningful.
+                pair_ok = valid[bi] & valid[ti]
+                if not np.any(pair_ok):
+                    continue
+                phi_pred = phi_at_t0[in_range][pair_ok] \
+                          + slope_arr[in_range][pair_ok] * tau
+                phi_true = phi_full[ti[pair_ok]]
+                d = phi_true - phi_pred
+                Dpred_linear[k] = float(np.mean(d * d))
+
+        # Kalman (optional, expensive)
+        if not skip_kalman:
+            kal = predict_kalman_with_mask(phi_full, fade_mask, sr,
+                                           taus_s, kalman_q_omega)
+            Dpred_kalman[:] = kal
+
+        rms_const  = np.sqrt(Dpred_const)
+        rms_linear = np.sqrt(Dpred_linear)
+        rms_kalman = np.sqrt(Dpred_kalman)
+        rms_desc   = np.sqrt(Ddesc)
+
         return dict(
             sample_rate_Hz=float(sr),
             carrier_beat_Hz=float(f_c),
-            n_segments=len(segs),
-            total_duration_s=float(sum(s.duration_s for s in segs)),
-            per_segment_slope_mean_Hz=float(slopes_arr.mean()) if slopes_arr.size else None,
-            per_segment_slope_max_abs_Hz=float(np.abs(slopes_arr).max()) if slopes_arr.size else None,
-            carrier_slope_std_Hz=slope_std,
+            bandwidth_hz=float(bandwidth_hz),
+            n_total_samples=int(n_total),
+            n_fade_samples=int(n_fade),
+            good_fraction=float(good_frac),
+            n_splices=int(n_splices),
+            residual_slope_Hz=residual_slope_hz,
             median_amp=float(np.median(A)),
             taus_s=taus_s.tolist(),
             rms_pred_constant_rad=rms_const.tolist(),
@@ -473,6 +637,58 @@ def compute_predictability(path: str, *,
         )
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+def predict_kalman_with_mask(phi: np.ndarray, fade_mask: np.ndarray,
+                             sr: float, taus: np.ndarray,
+                             q_omega: float = 1.0,
+                             r_phi: Optional[float] = None) -> np.ndarray:
+    """Kalman-filter prediction-error structure function with a fade
+    mask: when fade_mask[k] is True, skip the measurement update at
+    that step (predict-only) so the filter doesn't lock onto fade-
+    contaminated samples.
+
+    Same return shape as ``predict_kalman``.
+    """
+    n = phi.size
+    dt = 1.0 / sr
+    F = np.array([[1.0, dt], [0.0, 1.0]])
+    Q = np.array([[q_omega * dt**3 / 3, q_omega * dt**2 / 2],
+                  [q_omega * dt**2 / 2, q_omega * dt]])
+    H = np.array([[1.0, 0.0]])
+    if r_phi is None:
+        d1 = np.diff(phi[~fade_mask] if np.any(~fade_mask) else phi)
+        r_phi = max(0.5 * float(np.median(d1 * d1)), 1e-12)
+
+    x_post = np.zeros((n, 2))
+    x = np.array([phi[0], 0.0])
+    P = np.array([[r_phi, 0.0], [0.0, q_omega]])
+    x_post[0] = x
+    for k in range(1, n):
+        x = F @ x
+        P = F @ P @ F.T + Q
+        if not fade_mask[k]:
+            y = phi[k] - (H @ x)[0]
+            S = (H @ P @ H.T)[0, 0] + r_phi
+            K = (P @ H.T).flatten() / S
+            x = x + K * y
+            P = P - np.outer(K, H @ P)
+        x_post[k] = x
+
+    valid = ~fade_mask
+    out = np.full(taus.size, np.nan, dtype=np.float64)
+    for k_tau, tau in enumerate(taus):
+        m = int(round(tau * sr))
+        if m <= 0 or m >= n:
+            continue
+        phi_pred = x_post[:n - m, 0] + x_post[:n - m, 1] * tau
+        phi_true = phi[m:]
+        pair_ok = valid[:n - m] & valid[m:]
+        if not np.any(pair_ok):
+            continue
+        d = (phi_true - phi_pred)[pair_ok]
+        out[k_tau] = float(np.mean(d * d))
+    return out
 
 
 # ------------------------------------------------------------------ main
@@ -486,167 +702,85 @@ def main():
     p.add_argument("--out-json", default=None,
                    help="output JSON summary path "
                         "(default: <input>_predict.json)")
-    p.add_argument("--carrier-search-lo", type=float, default=1500.0,
-                   help="Hz; FFT search window lower bound for the beat tone")
-    p.add_argument("--carrier-search-hi", type=float, default=2500.0)
-    p.add_argument("--min-segment-s", type=float, default=1.0,
-                   help="minimum duration of a high-SNR window (s)")
-    p.add_argument("--amp-quantile", type=float, default=0.5,
-                   help="amplitude threshold quantile (0..1) on the "
-                        "*smoothed* amplitude")
-    p.add_argument("--amp-rel-var-max", type=float, default=0.5,
-                   help="reject windows whose smoothed amplitude "
-                        "RMS/median > this")
-    p.add_argument("--amp-smooth-s", type=float, default=0.1,
-                   help="moving-average window for amplitude "
-                        "smoothing (s) before thresholding")
-    p.add_argument("--tau-min", type=float, default=1e-3,
-                   help="lookahead tau lower bound (s)")
-    p.add_argument("--tau-max", type=float, default=0.2,
-                   help="lookahead tau upper bound (s)")
-    p.add_argument("--n-tau", type=int, default=40,
-                   help="number of tau samples (logspace)")
-    p.add_argument("--linear-fit-window-s", type=float, default=0.05,
-                   help="fitting window for the linear predictor (s)")
-    p.add_argument("--kalman-q-omega", type=float, default=1e3,
-                   help="Kalman process-noise on omega ((rad/s)^2 / s)")
+    p.add_argument("--bandwidth-hz", type=float, default=200.0,
+                   help="one-sided low-pass cutoff around the carrier (Hz). "
+                        "200 Hz preserves all the slow phase fluctuations "
+                        "while reducing tracker noise by ~50× in variance.")
+    p.add_argument("--snr-fade-db", type=float, default=12.0,
+                   help="fade threshold below 90th-percentile amplitude (dB)")
+    p.add_argument("--carrier-search-lo", type=float, default=500.0)
+    p.add_argument("--carrier-search-hi", type=float, default=4500.0)
+    p.add_argument("--tau-min", type=float, default=1e-3)
+    p.add_argument("--tau-max", type=float, default=0.2)
+    p.add_argument("--n-tau", type=int, default=40)
+    p.add_argument("--linear-fit-window-s", type=float, default=0.05)
+    p.add_argument("--kalman-q-omega", type=float, default=1.0)
+    p.add_argument("--skip-kalman", action="store_true")
     args = p.parse_args()
 
-    print(f"Loading {args.input}")
-    z, sr = load_kiwi_iq_wav(args.input)
-    print(f"  {z.size:,} complex samples at {sr:.0f} Hz "
-          f"({z.size/sr:.1f} s)")
-
-    f_c = find_carrier_freq(z, sr,
-                            search_lo=args.carrier_search_lo,
-                            search_hi=args.carrier_search_hi)
-    print(f"  carrier beat frequency: {f_c:.3f} Hz")
-
-    z_dc = mix_to_dc(z, sr, f_c)
-    A, phi = amplitude_phase(z_dc)
-
-    # NB: do NOT globally detrend.  Deep fades introduce huge unwrap
-    # errors that contaminate any global linear fit, and the prediction
-    # algorithms care about *local* phase behaviour anyway.  We instead
-    # detrend per-segment (below) so each high-SNR window has its own
-    # zero-mean, residual-slope-removed phase track.
-    print("Finding high-SNR segments…")
-    segs = find_high_snr_segments(
-        A, sr, min_duration_s=args.min_segment_s,
-        amp_threshold_quantile=args.amp_quantile,
-        amp_relative_var_max=args.amp_rel_var_max,
-        smooth_s=args.amp_smooth_s)
-    if not segs:
-        print("  NO segments matched the SNR criteria; relax the thresholds.",
-              file=sys.stderr)
-        sys.exit(1)
-    print(f"  found {len(segs)} segments, total "
-          f"{sum(s.duration_s for s in segs):.1f} s of usable data")
-    for k, s in enumerate(segs[:8]):
-        print(f"    segment {k:2d}: t = {s.i_start/sr:6.2f}-{s.i_end/sr:6.2f} s "
-              f"(dur {s.duration_s:5.2f} s), median A = {s.median_A:.2g}, "
-              f"rel var = {s.rms_A/s.median_A:.3f}")
-
-    # Define lookahead grid
     taus = np.geomspace(args.tau_min, args.tau_max, args.n_tau)
+    print(f"Processing {args.input}")
+    res = compute_predictability(
+        args.input, taus_s=taus,
+        bandwidth_hz=args.bandwidth_hz,
+        snr_fade_db=args.snr_fade_db,
+        linear_fit_window_s=args.linear_fit_window_s,
+        kalman_q_omega=args.kalman_q_omega,
+        skip_kalman=args.skip_kalman,
+        carrier_search_lo=args.carrier_search_lo,
+        carrier_search_hi=args.carrier_search_hi,
+    )
+    if "error" in res:
+        print(f"ERROR: {res['error']}", file=sys.stderr)
+        sys.exit(1)
 
-    # Run the predictors per segment, then average D_pred(tau) across
-    # segments weighted by segment length
-    n_tau = taus.size
-    Dpred_const  = np.zeros(n_tau)
-    Dpred_linear = np.zeros(n_tau)
-    Dpred_kalman = np.zeros(n_tau)
-    Ddesc        = np.zeros(n_tau)
-    weight       = np.zeros(n_tau)
-
-    per_segment_slopes_hz = []
-    for s in segs:
-        # Re-unwrap from raw IQ within the segment (avoids unwrap errors
-        # accumulated from deep fades elsewhere in the file).
-        z_dc_seg = z_dc[s.i_start:s.i_end]
-        phi_s = np.unwrap(np.angle(z_dc_seg)).astype(np.float64)
-        # Record the per-segment linear slope (residual Doppler/offset)
-        # for diagnostic purposes — but do NOT subtract it from phi_s.
-        # The predictors operate on the raw track that an operational
-        # closed-loop system would see; subtracting the slope before
-        # comparison would unfairly help the constant-phase predictor.
-        t_seg = np.arange(phi_s.size) / sr
-        slope_rad_per_s, _ = np.polyfit(t_seg, phi_s, 1)
-        per_segment_slopes_hz.append(float(slope_rad_per_s) / (2 * np.pi))
-        n_s = phi_s.size
-        dD_const  = predict_constant(phi_s, sr, taus)
-        dD_lin    = predict_linear(phi_s, sr, taus,
-                                    fit_window_s=args.linear_fit_window_s)
-        dD_kal    = predict_kalman(phi_s, sr, taus,
-                                    q_omega=args.kalman_q_omega)
-        dD_desc   = descriptive_structure_function(phi_s, sr, taus)
-        m = int(round(args.tau_max * sr))
-        n_eff = max(n_s - m, 0)
-        for arr, dst in [(dD_const, Dpred_const),
-                         (dD_lin,   Dpred_linear),
-                         (dD_kal,   Dpred_kalman),
-                         (dD_desc,  Ddesc)]:
-            ok = np.isfinite(arr)
-            dst[ok] += arr[ok] * n_eff
-        weight += n_eff * np.isfinite(dD_const)
-
-    weight = np.where(weight > 0, weight, np.nan)
-    Dpred_const  /= weight
-    Dpred_linear /= weight
-    Dpred_kalman /= weight
-    Ddesc        /= weight
-    rms_const  = np.sqrt(Dpred_const)
-    rms_linear = np.sqrt(Dpred_linear)
-    rms_kalman = np.sqrt(Dpred_kalman)
-    rms_desc   = np.sqrt(Ddesc)
-
-    carrier_quality = None
-    if per_segment_slopes_hz:
-        slopes = np.array(per_segment_slopes_hz)
-        slope_std = float(slopes.std())
-        carrier_quality = slope_std
-        print(f"\nPer-segment phase slopes (residual carrier in Hz):")
-        print(f"  mean {slopes.mean():+.4f} ± {slope_std:.4f} Hz "
-              f"(median {np.median(slopes):+.4f}, range "
-              f"{slopes.min():+.4f} … {slopes.max():+.4f})")
-        if slope_std > 5.0:
-            print(f"  WARNING: per-segment slopes vary by "
-                  f"{slope_std:.1f} Hz; carrier identification is "
-                  f"unreliable on this file (likely AM sideband "
-                  f"contamination).  Predictor results are suspect.")
-    print("\nRMS prediction error (rad) at selected lookaheads:")
+    sr = res["sample_rate_Hz"]
+    print(f"  sample rate:         {sr:.0f} Hz")
+    print(f"  carrier beat:        {res['carrier_beat_Hz']:+.3f} Hz")
+    print(f"  bandwidth:           ±{res['bandwidth_hz']:.0f} Hz")
+    print(f"  good fraction:       {res['good_fraction']*100:.1f}% "
+          f"(unfaded samples)")
+    print(f"  fade splices:        {res['n_splices']}")
+    print(f"  residual slope:      {res['residual_slope_Hz']:+.4f} Hz")
+    print(f"\nRMS prediction error (rad) at selected lookaheads:")
     print(f"  {'tau (ms)':>8}  {'const':>8}  {'linear':>8}  {'kalman':>8}  "
           f"{'D(tau)':>8}")
+    rms_const = np.array(res["rms_pred_constant_rad"])
+    rms_linear = np.array(res["rms_pred_linear_rad"])
+    rms_kalman = np.array(res["rms_pred_kalman_rad"])
+    rms_desc   = np.array(res["rms_descriptive_rad"])
     for tau in [0.001, 0.005, 0.020, 0.050, 0.100, 0.200]:
         if tau > taus[-1]: continue
         i = int(np.argmin(np.abs(taus - tau)))
         print(f"  {1000*taus[i]:8.2f}  {rms_const[i]:8.4f}  "
-              f"{rms_linear[i]:8.4f}  {rms_kalman[i]:8.4f}  "
+              f"{rms_linear[i]:8.4f}  "
+              f"{rms_kalman[i] if np.isfinite(rms_kalman[i]) else float('nan'):8.4f}  "
               f"{rms_desc[i]:8.4f}")
 
-    # ---------- output paths
     base, _ = os.path.splitext(args.input)
     out_png = args.out_png or (base + "_predict.png")
     out_json = args.out_json or (base + "_predict.json")
 
-    # ---------- plot
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
-    ax.loglog(1e3 * taus, rms_desc,   "k:", lw=1.5, label="D(τ) (descriptive)")
     ax.loglog(1e3 * taus, rms_const,  "C0",  lw=1.5,
               label="constant-phase (do nothing)")
     ax.loglog(1e3 * taus, rms_linear, "C1",  lw=1.5,
               label=f"linear extrap. (fit {1e3*args.linear_fit_window_s:.0f} ms)")
-    ax.loglog(1e3 * taus, rms_kalman, "C2",  lw=1.5,
-              label=f"Kalman (q_omega={args.kalman_q_omega:.0g})")
+    if not args.skip_kalman:
+        ax.loglog(1e3 * taus, rms_kalman, "C2",  lw=1.5,
+                  label=f"Kalman (q_ω={args.kalman_q_omega:.0g})")
     ax.set_xlabel("look-ahead τ (ms)")
     ax.set_ylabel("RMS prediction error (rad)")
-    ax.set_title(f"Phase predictability — {os.path.basename(args.input)}")
+    ax.set_title(f"Phase predictability — {os.path.basename(args.input)}\n"
+                 f"BW=±{args.bandwidth_hz:.0f} Hz, "
+                 f"good={res['good_fraction']*100:.0f}%, "
+                 f"residual carrier={res['residual_slope_Hz']:+.3f} Hz, "
+                 f"{res['n_splices']} splices")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(loc="lower right")
-    # Reference line: 0.5 rad threshold ("good" for adaptive correction)
     ax.axhline(0.5, color="0.6", lw=0.8, ls="--")
     ax.text(taus[-1]*1e3, 0.5, " 0.5 rad goal",
             va="center", ha="right", color="0.4", fontsize=9)
@@ -654,27 +788,11 @@ def main():
     fig.savefig(out_png, dpi=140, bbox_inches="tight")
     print(f"\nwrote {out_png}")
 
-    # ---------- json
-    summary = {
-        "input": os.path.abspath(args.input),
-        "sample_rate_Hz": sr,
-        "carrier_beat_Hz": f_c,
-        "per_segment_slopes_Hz": per_segment_slopes_hz,
-        "carrier_slope_std_Hz": carrier_quality,
-        "n_segments": len(segs),
-        "total_duration_s": float(sum(s.duration_s for s in segs)),
-        "linear_fit_window_s": args.linear_fit_window_s,
-        "kalman_q_omega": args.kalman_q_omega,
-        "amp_quantile": args.amp_quantile,
-        "amp_rel_var_max": args.amp_rel_var_max,
-        "taus_s": taus.tolist(),
-        "rms_pred_constant_rad": rms_const.tolist(),
-        "rms_pred_linear_rad":   rms_linear.tolist(),
-        "rms_pred_kalman_rad":   rms_kalman.tolist(),
-        "rms_descriptive_rad":   rms_desc.tolist(),
-    }
+    res["input"] = os.path.abspath(args.input)
+    res["linear_fit_window_s"] = args.linear_fit_window_s
+    res["kalman_q_omega"] = args.kalman_q_omega
     with open(out_json, "w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(res, f, indent=2)
     print(f"wrote {out_json}")
 
 

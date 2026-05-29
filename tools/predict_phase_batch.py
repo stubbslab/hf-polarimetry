@@ -100,11 +100,10 @@ def _do_one(path: str) -> dict:
     out = dict(meta)
     out.update({k: res[k] for k in (
         "sample_rate_Hz", "carrier_beat_Hz",
-        "n_segments", "total_duration_s",
-        "carrier_slope_std_Hz",
-        "per_segment_slope_mean_Hz",
-        "per_segment_slope_max_abs_Hz",
-        "median_amp")})
+        "bandwidth_hz", "n_total_samples", "n_fade_samples",
+        "good_fraction", "n_splices",
+        "residual_slope_Hz",
+        "median_amp") if k in res})
     for tau_target in (0.020, 0.050):
         i = int(np.argmin(np.abs(taus - tau_target)))
         tag = f"{int(round(tau_target*1000))}ms"
@@ -201,10 +200,12 @@ def main():
     aggregate(jsonl_path, out_dir, args.max_slope_std_hz)
 
 
-def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float):
+def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float,
+              min_good_fraction: float = 0.2,
+              max_residual_slope_hz: float = 50.0):
     print(f"\nAggregating {jsonl_path}…")
     rows = []
-    n_total = n_err = n_no_carrier = n_bad_carrier = 0
+    n_total = n_err = n_no_carrier = n_bad_carrier = n_too_faded = 0
     with open(jsonl_path) as f:
         for line in f:
             try:
@@ -215,26 +216,25 @@ def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float):
             if rec.get("error"):
                 n_err += 1
                 continue
-            slope_std = rec.get("carrier_slope_std_Hz")
-            slope_max = rec.get("per_segment_slope_max_abs_Hz")
-            if slope_std is None and slope_max is None:
+            gf = rec.get("good_fraction")
+            rs = rec.get("residual_slope_Hz")
+            if gf is None and rs is None:
                 n_no_carrier += 1
                 continue
-            # Reject files where either the per-segment slope std OR
-            # the max absolute slope exceeds the threshold.  In single-
-            # segment files only max_abs is meaningful.
-            if slope_max is not None and slope_max > max_slope_std_hz:
-                n_bad_carrier += 1
+            if gf is not None and gf < min_good_fraction:
+                n_too_faded += 1
                 continue
-            if slope_std is not None and rec.get("n_segments", 0) >= 2 \
-                    and slope_std > max_slope_std_hz:
+            if rs is not None and rs == rs and abs(rs) > max_residual_slope_hz:
                 n_bad_carrier += 1
                 continue
             rows.append(rec)
     print(f"  total records:            {n_total}")
     print(f"    errored:                {n_err}")
     print(f"    no carrier metric:      {n_no_carrier}")
-    print(f"    bad carrier (>{max_slope_std_hz:.1f} Hz): {n_bad_carrier}")
+    print(f"    too faded (<{min_good_fraction*100:.0f}% good): "
+          f"{n_too_faded}")
+    print(f"    bad carrier (|slope|>{max_residual_slope_hz:.0f} Hz): "
+          f"{n_bad_carrier}")
     print(f"    usable:                 {len(rows)}")
     if not rows:
         print("  nothing to aggregate; exiting")
