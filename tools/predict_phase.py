@@ -505,7 +505,11 @@ def compute_predictability(path: str, *,
     Returns a dict; on error, returns ``{"error": "..."}``.
     """
     if taus_s is None:
-        taus_s = np.geomspace(1e-3, 0.2, 25)
+        # Default geometric grid plus exact 20 / 50 / 75 ms reference
+        # points used by the batch summary tooling.
+        base = np.geomspace(1e-3, 0.2, 25)
+        anchors = np.array([0.020, 0.050, 0.075])
+        taus_s = np.unique(np.concatenate([base, anchors]))
     try:
         z, sr = load_kiwi_iq_wav(path)
         if z.size < int(5 * sr):

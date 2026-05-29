@@ -104,7 +104,7 @@ def _do_one(path: str) -> dict:
         "good_fraction", "n_splices",
         "residual_slope_Hz",
         "median_amp") if k in res})
-    for tau_target in (0.020, 0.050):
+    for tau_target in (0.020, 0.050, 0.075):
         i = int(np.argmin(np.abs(taus - tau_target)))
         tag = f"{int(round(tau_target*1000))}ms"
         out[f"rms_const_{tag}_rad"]  = res["rms_pred_constant_rad"][i]
@@ -116,9 +116,14 @@ def _do_one(path: str) -> dict:
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("input_dir", help="directory containing the .wav files")
+    p.add_argument("input_dir", nargs="?", default=None,
+                   help="directory containing the .wav files (omit if --file-list)")
     p.add_argument("--pattern", default="*.wav",
                    help="glob pattern for files within input_dir")
+    p.add_argument("--file-list", default=None,
+                   help="text file with one path per line; if given, "
+                        "input_dir/--pattern are ignored and only these "
+                        "files are processed")
     p.add_argument("--out-dir", default=None,
                    help="output directory for plots and JSONL "
                         "(default: <input_dir>/predict_phase_batch_out)")
@@ -139,11 +144,20 @@ def main():
     global _SKIP_KALMAN
     _SKIP_KALMAN = not args.with_kalman
 
-    out_dir = args.out_dir or os.path.join(args.input_dir,
-                                           "predict_phase_batch_out")
+    if args.file_list:
+        with open(args.file_list) as f:
+            files = [line.strip() for line in f if line.strip()]
+        # Default out-dir: alongside the file list
+        out_dir = args.out_dir or os.path.join(
+            os.path.dirname(os.path.abspath(args.file_list)) or ".",
+            "predict_phase_batch_out")
+    else:
+        if not args.input_dir:
+            p.error("must give either input_dir or --file-list")
+        out_dir = args.out_dir or os.path.join(args.input_dir,
+                                               "predict_phase_batch_out")
+        files = sorted(glob.glob(os.path.join(args.input_dir, args.pattern)))
     os.makedirs(out_dir, exist_ok=True)
-
-    files = sorted(glob.glob(os.path.join(args.input_dir, args.pattern)))
     if args.quick:
         files = files[::20]
     if args.max_files > 0:
@@ -252,6 +266,9 @@ def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float,
     rmsL_20  = np.array([r["rms_linear_20ms_rad"] for r in rows])
     rmsK_20  = np.array([r["rms_kalman_20ms_rad"] for r in rows])
     rmsC_50  = np.array([r["rms_const_50ms_rad"]  for r in rows])
+    rmsL_50  = np.array([r.get("rms_linear_50ms_rad", np.nan) for r in rows])
+    rmsC_75  = np.array([r.get("rms_const_75ms_rad",  np.nan) for r in rows])
+    rmsL_75  = np.array([r.get("rms_linear_75ms_rad", np.nan) for r in rows])
 
     # ---------- plot 1: D_pred(20 ms) vs RF frequency
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -327,7 +344,7 @@ def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float,
     plt.close(fig)
     print(f"  wrote {p2}")
 
-    # ---------- plot 3: correctable-fraction per band
+    # ---------- plot 3a: correctable-fraction at 20 ms
     fig, ax = plt.subplots(figsize=(8, 4.5))
     for predictor, arr, color in [("constant-phase", rmsC_20, "C0"),
                                    ("linear",        rmsL_20, "C1"),
@@ -342,27 +359,62 @@ def aggregate(jsonl_path: str, out_dir: str, max_slope_std_hz: float,
                 label=predictor)
     ax.set_xlabel("RF band (MHz)")
     ax.set_ylabel("% of files with D_pred(20 ms) < 0.5 rad")
-    ax.set_title(f"Fraction of files achieving the 0.5 rad correction "
-                 f"threshold  (N={len(rows)})")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    ax.set_ylim(-3, 103)
+    ax.set_title(f"Correctable fraction at τ = 20 ms (N={len(rows)})")
+    ax.grid(True, alpha=0.3); ax.legend(); ax.set_ylim(-3, 103)
     fig.tight_layout()
     p3 = os.path.join(out_dir, "predict_phase_correctable_fraction.png")
-    fig.savefig(p3, dpi=140, bbox_inches="tight")
-    plt.close(fig)
+    fig.savefig(p3, dpi=140, bbox_inches="tight"); plt.close(fig)
     print(f"  wrote {p3}")
 
-    # ---------- text summary
-    print(f"\nMedian D_pred(20 ms) by band, constant-phase predictor:")
-    print(f"  {'band':>6}  {'n':>5}  {'med rms':>8}  {'<0.5 rad':>9}")
+    # ---------- plot 3b: correctable-fraction across 20/50/75 ms
+    fig, ax = plt.subplots(figsize=(8.5, 5))
+    tau_curves = [(20, rmsC_20, rmsL_20),
+                  (50, rmsC_50, rmsL_50),
+                  (75, rmsC_75, rmsL_75)]
+    cmap = plt.get_cmap("tab10")
+    for k, (tau_ms, c_arr, l_arr) in enumerate(tau_curves):
+        for predictor, arr, ls in [("const",  c_arr, "-"),
+                                    ("linear", l_arr, "--")]:
+            frac = []
+            for b in bands:
+                mask = (freq_arr == b) & np.isfinite(arr)
+                if not np.any(mask):
+                    frac.append(np.nan); continue
+                frac.append(float(np.mean(arr[mask] < 0.5)))
+            ax.plot(bands, np.array(frac) * 100.0,
+                    ls=ls, marker="o" if predictor == "const" else "s",
+                    color=cmap(k),
+                    label=f"τ={tau_ms} ms ({predictor})")
+    ax.set_xlabel("RF band (MHz)")
+    ax.set_ylabel("% of files with D_pred(τ) < 0.5 rad")
+    ax.set_title(f"Correctable fraction at τ = 20 / 50 / 75 ms  "
+                 f"(N={len(rows)})")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=9, ncol=3)
+    ax.set_ylim(-3, 103)
+    fig.tight_layout()
+    p3b = os.path.join(out_dir,
+                       "predict_phase_correctable_fraction_multi_tau.png")
+    fig.savefig(p3b, dpi=140, bbox_inches="tight"); plt.close(fig)
+    print(f"  wrote {p3b}")
+
+    # ---------- text summary, all three lookaheads
+    print(f"\nMedian D_pred at 20 / 50 / 75 ms by band, constant-phase predictor:")
+    print(f"  {'band':>6}  {'n':>5}  "
+          f"{'med 20':>7}  {'med 50':>7}  {'med 75':>7}  "
+          f"{'<.5 (20)':>9}  {'<.5 (50)':>9}  {'<.5 (75)':>9}")
     for b in bands:
         mask = freq_arr == b
         if not np.any(mask): continue
-        med = float(np.median(rmsC_20[mask]))
-        frac = float(np.mean(rmsC_20[mask] < 0.5)) * 100.0
-        print(f"  {b:>5g}M  {int(mask.sum()):>5d}  "
-              f"{med:8.3f}  {frac:8.1f}%")
+        n_b = int(mask.sum())
+        m20 = float(np.median(rmsC_20[mask]))
+        m50 = float(np.nanmedian(rmsC_50[mask]))
+        m75 = float(np.nanmedian(rmsC_75[mask]))
+        f20 = float(np.mean(rmsC_20[mask] < 0.5)) * 100.0
+        f50 = float(np.nanmean(rmsC_50[mask] < 0.5)) * 100.0
+        f75 = float(np.nanmean(rmsC_75[mask] < 0.5)) * 100.0
+        print(f"  {b:>5g}M  {n_b:>5d}  "
+              f"{m20:7.3f}  {m50:7.3f}  {m75:7.3f}  "
+              f"{f20:8.1f}%  {f50:8.1f}%  {f75:8.1f}%")
 
 
 if __name__ == "__main__":
