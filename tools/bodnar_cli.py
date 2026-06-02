@@ -73,7 +73,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from bodnar_gui import HIDBackend     # noqa: E402
+from bodnar_gui import HIDBackend, SerialBackend, format_gps_time     # noqa: E402
 
 
 PRESETS = {
@@ -157,6 +157,77 @@ def print_status(bb: HIDBackend, as_json: bool = False) -> int:
     return 0
 
 
+def print_gps_status(serial_bb: SerialBackend, settle_seconds: float = 1.5,
+                     as_json: bool = False) -> int:
+    """Open the Bodnar's CDC NMEA stream, give it a moment to populate
+    a fresh fix, then print lat/lon/time/sat-count.  Independent from
+    the HID interface; both can be open simultaneously."""
+    import time as _time
+    try:
+        serial_bb.connect()
+    except Exception as e:
+        if as_json:
+            print(json.dumps({'gps_error': str(e)}))
+        else:
+            print(f"  (could not open CDC NMEA port: {e})")
+        return 0    # don't fail the whole run if the CDC port is busy
+    # Wait for at least one full sentence to arrive
+    deadline = _time.time() + settle_seconds
+    while _time.time() < deadline:
+        st = serial_bb.get_fix_state()
+        if st.n_sentences > 4 and st.utc_time:
+            break
+        _time.sleep(0.1)
+    s = serial_bb.get_fix_state()
+    serial_bb.disconnect()
+
+    if as_json:
+        print(json.dumps({
+            'fix_quality':   s.fix_quality,
+            'utc_time':      s.utc_time,
+            'utc_date':      s.utc_date,
+            'lat_deg':       s.lat_deg,
+            'lon_deg':       s.lon_deg,
+            'alt_m':         s.alt_m,
+            'n_sats_used':   s.n_sats_used,
+            'sats_in_view':  s.sats_in_view,
+            'hdop':          s.hdop,
+            'pdop':          s.pdop,
+            'vdop':          s.vdop,
+        }))
+        return 0
+
+    fq_label = {0: 'NO FIX', 1: '3D fix', 2: 'DGPS', 4: 'RTK fixed',
+                5: 'RTK float', 6: 'estimated'}.get(s.fix_quality,
+                                                    f'q={s.fix_quality}')
+    print()
+    print("GPS / NMEA  status (read from /dev/cu.usbmodem...):")
+    print(f"  fix:          {fq_label}")
+    print(f"  UTC:          {format_gps_time(s.utc_time, s.utc_date)}")
+    if s.fix_quality > 0:
+        if s.lat_deg == s.lat_deg:    # not NaN
+            print(f"  position:     {s.lat_deg:+.6f}°N  {s.lon_deg:+.6f}°E")
+        if s.alt_m == s.alt_m:
+            print(f"  altitude:     {s.alt_m:.1f} m")
+    print(f"  sats used:    {s.n_sats_used}")
+    if s.sats_in_view:
+        in_view = '  '.join(f'{c}={n}' for c, n in
+                             sorted(s.sats_in_view.items()))
+        print(f"  sats in view: {in_view}")
+    if s.sat_snrs:
+        snr_lines = []
+        for c, snrs in sorted(s.sat_snrs.items()):
+            if snrs:
+                snr_lines.append(
+                    f'{c} med={sorted(snrs)[len(snrs)//2]} dB '
+                    f'(n={len(snrs)}, max={max(snrs)})')
+        if snr_lines:
+            print(f"  SNR:          " + ',  '.join(snr_lines))
+    if s.hdop == s.hdop:
+        print(f"  HDOP:         {s.hdop:.2f}")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -179,6 +250,9 @@ def main() -> int:
     p.add_argument('--raw-status', action='store_true',
                    help='dump the full 64-byte HID status response in '
                         'hex for protocol debugging')
+    p.add_argument('--no-gps', action='store_true',
+                   help='skip the CDC NMEA read for lat/lon/UTC/sats '
+                        '(faster status; default is to include it)')
     args = p.parse_args()
 
     # Default to status if no other action requested
@@ -236,6 +310,11 @@ def main() -> int:
             if do_writes and not args.quiet:
                 print()                # blank line before status
             rc = print_status(bb, as_json=args.json)
+            # GPS status (CDC NMEA).  HID and CDC are independent USB
+            # endpoints, so this works even while HIDBackend is open.
+            if rc == 0 and not args.no_gps:
+                gps_bb = SerialBackend()
+                rc = print_gps_status(gps_bb, as_json=args.json)
     finally:
         bb.disconnect()
     return rc
