@@ -174,9 +174,22 @@ hf-polarimetry/
 │   └── make_example_capture.py          regenerate the example
 └── tools/
     ├── README.md
-    └── bodnar_gui.py                    Tkinter GUI for the Leo Bodnar
-                                          Dual GPSDO (the recommended
-                                          GPS-locked HF synthesizer)
+    ├── bodnar_gui.py                    Tkinter GUI for the Leo Bodnar
+    │                                     LBE-1425 Dual GPSDO (the
+    │                                     recommended GPS-locked HF
+    │                                     synthesizer)
+    ├── bodnar_cli.py                    Scriptable CLI front-end for
+    │                                     the same GPSDO -- read status,
+    │                                     set frequencies, dump raw HID
+    │                                     reports
+    ├── BODNAR_LBE1425_PROTOCOL.md       Reverse-engineered USB HID
+    │                                     protocol for the LBE-1425,
+    │                                     with verification log
+    ├── predict_phase.py                 Phase-prediction analysis on
+    │                                     KiwiSDR IQ recordings
+    ├── predict_phase_batch.py           Batch driver for many recordings
+    └── predict_phase_explore.py         Deeper diagnostic plots from a
+                                          batch run
 ```
 
 ## What's *not* in the repo
