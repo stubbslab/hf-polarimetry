@@ -273,7 +273,9 @@ class SerialBackend(GPSDOBackend):
     FixState that the GUI polls.
     """
     name = "Serial"
-    n_outputs = 1                  # LBE-1425 has one RF output
+    n_outputs = 2                  # LBE-1425 has two RF outputs (control
+                                    # them via the HID backend; this serial
+                                    # backend only reads NMEA status)
     supports_frequency_control = False
 
     def __init__(self, port: Optional[str] = None, baud: int = 115200):
@@ -455,22 +457,362 @@ def assess_quality(s: FixState) -> Tuple[str, str, str]:
 # .................................................................... HID
 
 class HIDBackend(GPSDOBackend):
-    """Placeholder.  Frequency control on the Bodnar units uses a HID
-    feature-report protocol documented in the unit's manual.  Not yet
-    implemented; falls back to serial NMEA for status reporting."""
-    name = "HID (not implemented)"
-    n_outputs = 1
-    supports_frequency_control = False
+    """USB-HID frequency-control backend for Leo Bodnar LBE-1425
+    (and family).  Reverse-engineered protocol from
+    github.com/jjcarrier/gpsdo (C# implementation, MIT license) and
+    github.com/bvernoux/lbe-142x (C, GPL).
+
+    Wire protocol (LBE-1425 / LBE-1421):
+      - 64-byte HID feature report
+      - byte 0 : report ID = 0x00
+      - byte 1 : opcode
+            0x05 = SetOut1Freq (temporary)
+            0x06 = SetOut1Freq (permanent / persisted)
+            0x09 = SetOut2Freq (temporary)
+            0x0A = SetOut2Freq (permanent / persisted)
+      - bytes 2-5 : Q32 fractional part (little-endian uint32)
+      - bytes 6-9 : integer Hz (little-endian uint32)
+      - bytes 10-63 : zero-padded
+    USB IDs (per device):
+      - LBE-1425: VID=0x1DD2, PID=0x2269
+      - LBE-1421: VID=0x1DD2, PID=0x2444
+      - LBE-1420: VID=0x1DD2, PID=0x2443  (single-output, integer-only
+                                            payload at bytes 2-5)
+    """
+    name = "HID"
+    n_outputs = 2                     # LBE-1425 has two RF outputs
+    supports_frequency_control = True
+
+    # (VID, PID) -> (model_name, supports_q32_32, n_outputs)
+    KNOWN_DEVICES = {
+        (0x1DD2, 0x2269): ('LBE-1425', True,  2),
+        (0x1DD2, 0x2444): ('LBE-1421', True,  2),
+        (0x1DD2, 0x2443): ('LBE-1420', False, 1),
+    }
+
+    REPORT_SIZE = 64
+    # opcodes for Q32-format devices (1421 / 1425)
+    OPCODE_SET_OUT1_PERM = 0x06
+    OPCODE_SET_OUT2_PERM = 0x0A
+    OPCODE_SET_OUT1_TEMP = 0x05
+    OPCODE_SET_OUT2_TEMP = 0x09
+    # opcodes for integer-only devices (1420)
+    OPCODE_SET_OUT1_PERM_INT = 0x04
+    OPCODE_SET_OUT1_TEMP_INT = 0x03
+    # status / readback feature report (Q32 family)
+    OPCODE_STATUS = 0x4B
+
+    # Status-byte bitmask (offset 2 in status report)
+    STATUS_GPS_LOCKED = 0x01
+    STATUS_PLL_LOCKED = 0x02
+    STATUS_ANT_OK     = 0x04
+    STATUS_OUT1_LED   = 0x08
+    STATUS_OUT2_LED   = 0x10
+    STATUS_OUT1_EN    = 0x20
+    STATUS_OUT2_EN    = 0x40
+    STATUS_PPS_EN     = 0x80
+
+    def __init__(self, persist: bool = True):
+        self._device = None
+        self._persist = persist
+        self._model_name = None
+        self._supports_q32_32 = True
+        self._fix_state = FixState()
+
+    @staticmethod
+    def _ensure_libhidapi_findable():
+        """The Python `hid` package does ctypes.CDLL on import to load
+        libhidapi.dylib.  On macOS that defaults to looking in
+        DYLD_LIBRARY_PATH, which is typically empty.  Pre-load the
+        dylib by absolute path from common install locations so the
+        subsequent CDLL call finds it already mapped.
+
+        Idempotent.  Safe to call repeatedly.
+        """
+        import os, sys
+        if sys.platform == 'darwin':
+            candidates = [
+                '/opt/homebrew/lib',           # Homebrew Apple Silicon
+                '/usr/local/lib',              # Homebrew Intel / manual install
+                '/Applications/PicoScope.app/Contents/Frameworks',
+            ]
+            names = [
+                'libhidapi.dylib',
+                'libhidapi.0.dylib',
+                'libhidapi-iohidmanager.dylib',
+                'libhidapi-iohidmanager.0.dylib',
+            ]
+        elif sys.platform.startswith('linux'):
+            candidates = ['/usr/lib/x86_64-linux-gnu', '/usr/lib', '/usr/local/lib']
+            names = [
+                'libhidapi-hidraw.so',  'libhidapi-hidraw.so.0',
+                'libhidapi-libusb.so',  'libhidapi-libusb.so.0',
+                'libhidapi.so',         'libhidapi.so.0',
+            ]
+        else:
+            return  # Windows: the package finds hidapi.dll on PATH by default
+
+        # Update DYLD_LIBRARY_PATH (or LD_LIBRARY_PATH) for child loads.
+        env_var = ('DYLD_LIBRARY_PATH' if sys.platform == 'darwin'
+                   else 'LD_LIBRARY_PATH')
+        existing = [d for d in candidates if os.path.isdir(d)]
+        if existing:
+            current = os.environ.get(env_var, '')
+            parts = current.split(':') if current else []
+            new = [d for d in existing if d not in parts]
+            if new:
+                os.environ[env_var] = ':'.join(new + parts)
+
+        # Belt-and-suspenders: pre-load the dylib by absolute path so
+        # that even if ctypes.CDLL doesn't honor the env var (recent
+        # macOS strips DYLD_LIBRARY_PATH from system Python under SIP),
+        # the library is already mapped into the process by name.
+        import ctypes
+        for d in existing:
+            for name in names:
+                full = os.path.join(d, name)
+                if os.path.exists(full):
+                    try:
+                        ctypes.CDLL(full)
+                    except OSError:
+                        pass
 
     def connect(self):
-        raise RuntimeError(
-            "HID frequency-control protocol not yet implemented.\n"
-            "Use 'Serial' to read GPS status from the LBE-1425's CDC "
-            "interface.  For frequency control, refer to the Leo "
-            "Bodnar manual and extend HIDBackend.set_frequency_hz.")
-    def disconnect(self): pass
-    def is_connected(self): return False
-    def get_fix_state(self): return FixState()
+        # Make sure the native libhidapi.dylib is findable BEFORE the
+        # python `hid` wrapper tries to load it (it does so on import).
+        self._ensure_libhidapi_findable()
+        try:
+            import hid
+        except ImportError as e:
+            raise RuntimeError(
+                "Cannot load the native libhidapi library that the Python\n"
+                "`hid` package wraps.  On macOS install it via:\n"
+                "    brew install hidapi\n"
+                "(Apple Silicon: places it in /opt/homebrew/lib/.\n"
+                " Intel Mac:     places it in /usr/local/lib/.)\n"
+                "On Linux:    apt-get install libhidapi-hidraw0 libhidapi-libusb0\n"
+                f"\nUnderlying error:\n  {e}"
+            ) from e
+        # Enumerate; pick the first matching device
+        candidates = []
+        for d in hid.enumerate():
+            key = (d.get('vendor_id'), d.get('product_id'))
+            if key in self.KNOWN_DEVICES:
+                candidates.append((key, d))
+        if not candidates:
+            known = ', '.join(f'{m}=VID:{v:04x}/PID:{p:04x}'
+                              for (v, p), (m, _, _)
+                              in self.KNOWN_DEVICES.items())
+            raise RuntimeError(
+                "no Bodnar GPSDO found on USB HID.  Looked for: " + known)
+        (vid, pid), info = candidates[0]
+        model_name, q32, n_out = self.KNOWN_DEVICES[(vid, pid)]
+        self._model_name = model_name
+        self._supports_q32_32 = q32
+        # Update class state to reflect actual unit
+        self.n_outputs = n_out
+        # Open
+        try:
+            self._device = hid.Device(vid=vid, pid=pid)
+        except Exception as e:
+            raise RuntimeError(
+                f"could not open HID device {model_name} "
+                f"(VID:{vid:04x}/PID:{pid:04x}): {e}") from e
+
+    def disconnect(self):
+        if self._device is not None:
+            try:
+                self._device.close()
+            except Exception:
+                pass
+        self._device = None
+
+    def is_connected(self) -> bool:
+        return self._device is not None
+
+    def get_fix_state(self) -> FixState:
+        """Read the status feature-report and synthesize a FixState.
+
+        The HID interface only reports lock booleans (GPS, PLL, antenna)
+        and output enable bits.  It does NOT expose satellite count,
+        DOP, lat/lon, or NMEA-style timing.  For richer GPS status,
+        also run a Serial backend in parallel.
+        """
+        s = FixState()
+        s.last_sentence_time = time.time()
+        s.n_sentences += 1
+        try:
+            status = self.read_status()
+        except Exception:
+            return s
+        if not status:
+            return s
+        s.fix_quality = 1 if status['gps_locked'] else 0
+        # Sat count not available over HID; leave at 0 unless someone
+        # else (Serial backend) populates it.
+        s.n_sats_used = 0
+        # We can use the HID status bits to populate the locked-since
+        # time so the GUI's "locked for: HH:MM:SS" still works in
+        # HID-only mode.
+        if status['gps_locked']:
+            if s.fix_locked_since is None:
+                s.fix_locked_since = time.time()
+        else:
+            s.fix_locked_since = None
+        return s
+
+    def read_status_raw(self) -> bytes:
+        """Issue the 0x4B status feature report and return the raw
+        response bytes WITHOUT parsing.  For protocol debugging."""
+        if self._device is None:
+            raise RuntimeError("HID device not open")
+        # Try the modern hidapi API first
+        data = None
+        try:
+            data = self._device.get_feature_report(self.OPCODE_STATUS,
+                                                    self.REPORT_SIZE)
+        except AttributeError:
+            # Older cython-hidapi: write request, then read
+            req = bytearray(self.REPORT_SIZE)
+            req[0] = self.OPCODE_STATUS
+            self._device.write(bytes(req))
+            data = self._device.read(self.REPORT_SIZE, timeout_ms=200)
+        except Exception as e:
+            raise RuntimeError(f"HID get_feature_report failed: {e}") from e
+        if data is None:
+            raise RuntimeError("HID returned None for status request")
+        return bytes(data)
+
+    def read_status(self) -> dict:
+        """Read the LBE-1425's HID status feature report (opcode 0x4B).
+
+        Returns a dict with:
+          gps_locked, pll_locked, ant_ok       (bool)
+          out1_enabled, out2_enabled, pps_enabled  (bool)
+          out1_freq_hz, out2_freq_hz           (float, sub-Hz precision)
+          fll_enabled, out1_low_power, out2_low_power, out1_nmea  (bool)
+
+        Raises RuntimeError if the device isn't open or the read fails.
+        """
+        data = self.read_status_raw()
+        if len(data) < 25:
+            raise RuntimeError(
+                f"unexpected short status response ({len(data)} bytes)")
+
+        # ----- Layout verified empirically against an LBE-1425 -----
+        # Confirmed by toggling each setting in the official Bodnar
+        # app and diffing the response:
+        #
+        # byte  1     : status bitmask (NOT byte 2 as the C# reference)
+        # bytes 6-9   : output 1 frequency, integer Hz (little-endian u32)
+        # bytes 14-17 : output 2 frequency, integer Hz
+        # byte  18    : FLL enabled (1 = on)
+        # byte  19    : output 1 low-power (1 = on)
+        # byte  20    : output 2 low-power (1 = on)
+        # bytes 21-23 : unknown constant (0x67 0x02 0x05 on this unit)
+        #               -- DOES NOT CHANGE with output / FLL / power
+        #               toggles, so probably hardware/firmware ID
+        #
+        # This contradicts the C# jjcarrier/gpsdo layout (status at
+        # byte 2, Q32.32 freqs) but partially matches the C
+        # bvernoux/lbe-142x LBE-1421 layout (integer freqs at 6-9 and
+        # 14-17).  Different firmware revisions / SKUs use different
+        # protocol revisions; ours is the layout above.
+
+        sb = data[1]
+
+        def le_u32(off):
+            return (data[off]      | (data[off+1] << 8)
+                    | (data[off+2] << 16) | (data[off+3] << 24))
+
+        return {
+            'gps_locked':       bool(sb & self.STATUS_GPS_LOCKED),
+            'pll_locked':       bool(sb & self.STATUS_PLL_LOCKED),
+            'ant_ok':           bool(sb & self.STATUS_ANT_OK),
+            'out1_led':         bool(sb & self.STATUS_OUT1_LED),
+            'out2_led':         bool(sb & self.STATUS_OUT2_LED),
+            'out1_enabled':     bool(sb & self.STATUS_OUT1_EN),
+            'out2_enabled':     bool(sb & self.STATUS_OUT2_EN),
+            'pps_enabled':      bool(sb & self.STATUS_PPS_EN),
+            'out1_freq_hz':     float(le_u32(6)),
+            'out2_freq_hz':     float(le_u32(14)),
+            'fll_enabled':      bool(data[18]) if len(data) > 18 else False,
+            'out1_low_power':   bool(data[19]) if len(data) > 19 else False,
+            'out2_low_power':   bool(data[20]) if len(data) > 20 else False,
+            'out1_nmea':        False,   # not in this firmware's report
+            'raw_status_byte':  sb,
+            'model':            self._model_name,
+        }
+
+    def get_frequency_hz(self, output_index: int) -> float:
+        """Convenience: return the currently-set frequency on output N."""
+        s = self.read_status()
+        if output_index == 0:
+            return s['out1_freq_hz']
+        elif output_index == 1:
+            return s['out2_freq_hz']
+        else:
+            raise ValueError(f"output_index must be 0 or 1; got {output_index}")
+
+    def set_frequency_hz(self, output_index: int, hz: float) -> None:
+        if self._device is None:
+            raise RuntimeError("HID device not open")
+        if output_index not in (0, 1):
+            raise ValueError(f"output_index must be 0 or 1; got {output_index}")
+        if output_index == 1 and self.n_outputs < 2:
+            raise ValueError(f"{self._model_name} has only one output")
+
+        # Split hz into integer and Q32 fractional parts
+        hz_int = int(hz)
+        frac = int(round((hz - hz_int) * (1 << 32))) & 0xFFFFFFFF
+
+        # Pick opcode
+        if self._supports_q32_32:
+            if output_index == 0:
+                op = (self.OPCODE_SET_OUT1_PERM if self._persist
+                      else self.OPCODE_SET_OUT1_TEMP)
+            else:
+                op = (self.OPCODE_SET_OUT2_PERM if self._persist
+                      else self.OPCODE_SET_OUT2_TEMP)
+        else:
+            # LBE-1420: single output, integer-only
+            op = (self.OPCODE_SET_OUT1_PERM_INT if self._persist
+                  else self.OPCODE_SET_OUT1_TEMP_INT)
+
+        # Build report.  LBE-1425 firmware revision (verified empirically
+        # against this unit's behavior) uses an INTEGER-ONLY u32
+        # frequency payload at WRITE offset 6, matching the read-back
+        # layout in the 0x4B status report (also at byte 6 for output
+        # 1 and byte 14 for output 2).
+        #
+        # An earlier draft of this code wrote the u32 at offset 5
+        # (matching the bvernoux/lbe-142x C reference for LBE-1421),
+        # but that gave a /4096 frequency error vs. the requested
+        # value -- the firmware reads the integer u32 starting at
+        # byte 6.
+        #
+        # Layout (HID feature report):
+        #   buf[0]   = 0x00      (report ID)
+        #   buf[1]   = opcode    (e.g. 0x06 = SetOut1FreqPerm)
+        #   buf[2..5] = 0        (reserved)
+        #   buf[6..9] = hz_int   (little-endian u32 frequency in Hz)
+        #
+        # No fractional part.  Sub-Hz precision NOT available with
+        # this firmware via this opcode.
+        buf = bytearray(self.REPORT_SIZE)
+        buf[0] = 0x00
+        buf[1] = op
+        buf[6] = (hz_int >> 0)  & 0xFF
+        buf[7] = (hz_int >> 8)  & 0xFF
+        buf[8] = (hz_int >> 16) & 0xFF
+        buf[9] = (hz_int >> 24) & 0xFF
+
+        # Send as a feature report
+        try:
+            self._device.send_feature_report(bytes(buf))
+        except AttributeError:
+            # Older hidapi binding API: write() instead
+            self._device.write(bytes(buf))
 
 
 BACKENDS = {

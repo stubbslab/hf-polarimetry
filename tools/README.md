@@ -64,8 +64,8 @@ work better on long-coherent captures) and ``--linear-fit-window-s``
 
 ## bodnar_gui.py
 
-Tkinter GUI for the **Leo Bodnar Dual GPSDO** (the recommended GPS-locked
-frequency synthesizer for HF phase-jitter experiments;
+Tkinter GUI for the **Leo Bodnar LBE-1425 Dual GPSDO** (the recommended
+GPS-locked frequency synthesizer for HF phase-jitter experiments;
 <https://www.leobodnar.com>).
 
 ```bash
@@ -74,47 +74,76 @@ python3 tools/bodnar_gui.py
 
 Features:
 
-- Two-output frequency control with sub-Hz precision.
+- Two-output frequency control with 1 Hz precision (this firmware
+  revision; see protocol notes below).
 - WWV band presets (2.5 / 5 / 10 / 15 / 20 / 25 MHz) on each output.
 - CHU and ISM 13.56 MHz presets.
-- Sub-Hz fine-adjust nudge buttons (± 1, 0.1, 0.01 Hz).
-- GPS lock status + satellite count polling.
+- Sub-Hz fine-adjust nudge buttons (display only on this firmware --
+  underlying writes are integer-Hz).
+- GPS / PLL / antenna lock status from the HID status feature report.
 - Save/load configuration to JSON.
 
 ### Backends
 
-Three transports are supported and selectable in the GUI:
-
 | Backend | When to use | Install |
 |---|---|---|
 | Simulator | No hardware connected; learn the GUI | (none) |
-| HID       | Current Bodnar firmware (USB HID) | `pip install hidapi` |
-| Serial    | Older firmware / clones (USB-CDC TTY) | `pip install pyserial` |
+| HID       | LBE-1425 (and likely LBE-1421) frequency control | `pip install hid hidapi` + `brew install hidapi` |
+| Serial    | NMEA status read on units with a CDC interface (LBE-1421/1423; NOT the LBE-1425) | `pip install pyserial` |
 
-### Important caveats (must read before science use)
+### Wire-protocol verification status
 
-The **HID backend's USB Vendor/Product IDs** and **packet layout** are
-**placeholders**.  Before relying on this for science work:
+The HID protocol used by `HIDBackend` has been **empirically verified**
+against an actual LBE-1425 (factory firmware, 2026 timestamp).  See
+[BODNAR_LBE1425_PROTOCOL.md](BODNAR_LBE1425_PROTOCOL.md) for:
 
-1. Plug the Bodnar in.  Find the real VID/PID:
-   ```bash
-   # macOS
-   system_profiler SPUSBDataType | grep -A 5 -i bodnar
-   # Linux
-   lsusb -v 2>/dev/null | grep -B 1 -A 5 -i bodnar
-   ```
-2. Download the Bodnar's user manual from <https://www.leobodnar.com>
-   and confirm the HID feature-report register layout for setting
-   the Si5351 fractional divider.
-3. Update `HIDBackend.VID`, `HIDBackend.PID`, and the byte encoding
-   in `HIDBackend.set_frequency_hz` accordingly.
+- USB VID / PID
+- Feature-report layouts (read-back at byte 1 status / bytes 6-9 freq1 /
+  bytes 14-17 freq2; write payload at bytes 6-9, integer u32 only)
+- Set-frequency opcodes (0x05/0x06 for output 1 temp/persist;
+  0x09/0x0A for output 2)
+- Status bitmask decoding (GPS / PLL / antenna / output enable / PPS)
+- Verification log with before/after byte dumps for every flag we
+  decoded
+- What's NOT yet decoded (constellation enable, satellite count, etc.)
 
-Same applies to the **Serial backend's** ASCII command syntax — the
-``F<output> <hz>\r\n`` form is illustrative only.  Confirm against the
-manual or by capturing traffic from the vendor's Windows utility with
-USBPcap before relying on it.
+If you have a different Bodnar SKU or a substantially different firmware
+revision, re-verify before trusting science results.  The protocol doc
+includes a step-by-step procedure for diffing a new feature against the
+verified baseline.
 
-The GUI's plumbing (event loop, layout, presets, log, save/load) is
-ready to use; only the wire-protocol details need verification once a
-unit is in hand.  The Simulator backend is fully working and lets you
-exercise the UI without hardware.
+### Hardware exclusivity
+
+The LBE-1425 exposes a single HID interface and only one process can
+hold it open at a time.  The official Bodnar Windows / macOS app and
+our tooling **cannot run simultaneously**; quit one before launching
+the other.  This is normal HID-class device behavior, not a bug.
+
+## bodnar_cli.py
+
+Command-line wrapper around the same `HIDBackend` used by the GUI.
+Useful for scripting and automation.
+
+```bash
+python3 tools/bodnar_cli.py                          # status read
+python3 tools/bodnar_cli.py --out1 10MHz             # set output 1
+python3 tools/bodnar_cli.py --out1 10MHz --out2 24kHz   # set both
+python3 tools/bodnar_cli.py --out1 5MHz --temp       # RAM-only write
+python3 tools/bodnar_cli.py --raw-status             # 64-byte hex dump
+                                                      # (for protocol
+                                                      # debugging)
+python3 tools/bodnar_cli.py --status --json          # machine-readable
+```
+
+Frequency parsing accepts: `Hz`, `kHz`, `MHz` suffixes; bare numbers
+treated as Hz; preset names like `wwv5`, `wwv10`, `chu7.85`, `ism`.
+
+Default writes are **persistent** (written to the unit's flash).  Use
+`--temp` for testing — the temporary opcodes do not touch flash and
+revert on power cycle.
+
+Exit codes:
+- 0 : success
+- 1 : device not found / connection error
+- 2 : invalid arguments
+- 3 : HID write or read failure
