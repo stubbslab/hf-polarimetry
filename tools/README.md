@@ -88,8 +88,12 @@ Features:
 | Backend | When to use | Install |
 |---|---|---|
 | Simulator | No hardware connected; learn the GUI | (none) |
-| HID       | LBE-1425 (and likely LBE-1421) frequency control | `pip install hid hidapi` + `brew install hidapi` |
-| Serial    | NMEA status read on units with a CDC interface (LBE-1421/1423; NOT the LBE-1425) | `pip install pyserial` |
+| HID       | LBE-1425 (and likely LBE-1421) frequency control + lock booleans | `pip install hid hidapi` + `brew install hidapi` |
+| Serial    | NMEA stream from the unit's CDC interface — UTC time, lat/lon, sat count, HDOP. Available on LBE-1425, LBE-1421, LBE-1423. | `pip install pyserial` |
+
+The HID and CDC interfaces are independent USB endpoints and can both
+be open simultaneously; the GUI uses both, and `bodnar_cli.py` opens
+both on each `--status` read.
 
 ### Wire-protocol verification status
 
@@ -114,36 +118,173 @@ verified baseline.
 
 ### Hardware exclusivity
 
-The LBE-1425 exposes a single HID interface and only one process can
-hold it open at a time.  The official Bodnar Windows / macOS app and
-our tooling **cannot run simultaneously**; quit one before launching
-the other.  This is normal HID-class device behavior, not a bug.
+The LBE-1425 exposes a HID interface (control / lock state) and a
+separate USB CDC serial interface (NMEA stream).  Within each
+interface, only one process can hold it open at a time.  Specifically:
 
-## bodnar_cli.py
+- The **official Bodnar app** and our **HIDBackend** both want the HID
+  endpoint exclusively.  Quit one before launching the other.
+- The **CDC NMEA endpoint** also serves only one reader at a time, so
+  if the official app is reading it, our `bodnar_cli.py --status` won't
+  see GPS data (it'll print `(could not open CDC NMEA port)` and skip).
 
-Command-line wrapper around the same `HIDBackend` used by the GUI.
-Useful for scripting and automation.
+This is normal USB-class behavior, not a bug.
+
+## bodnar_cli.py — command-line interface
+
+Command-line front-end to the same `HIDBackend` and `SerialBackend`
+used by the GUI.  Useful for scripts, automation, and quick bench
+tests.  All three of:
+
+- HID frequency control (write to flash or RAM-only)
+- HID status read (lock booleans, frequencies, FLL/low-power flags)
+- CDC NMEA read (UTC time, lat/lon, satellite counts, HDOP)
+
+are folded into one tool.
+
+### Synopsis
 
 ```bash
-python3 tools/bodnar_cli.py                          # status read
-python3 tools/bodnar_cli.py --out1 10MHz             # set output 1
-python3 tools/bodnar_cli.py --out1 10MHz --out2 24kHz   # set both
-python3 tools/bodnar_cli.py --out1 5MHz --temp       # RAM-only write
-python3 tools/bodnar_cli.py --raw-status             # 64-byte hex dump
-                                                      # (for protocol
-                                                      # debugging)
-python3 tools/bodnar_cli.py --status --json          # machine-readable
+python3 tools/bodnar_cli.py [--out1 FREQ] [--out2 FREQ]
+                            [--temp] [--quiet]
+                            [--status] [--no-gps] [--json]
+                            [--raw-status]
 ```
 
-Frequency parsing accepts: `Hz`, `kHz`, `MHz` suffixes; bare numbers
-treated as Hz; preset names like `wwv5`, `wwv10`, `chu7.85`, `ism`.
+When invoked with no flags, `bodnar_cli.py` prints a full status
+report (HID + GPS).  When invoked with `--out1` and/or `--out2`, it
+sets the requested frequencies, then prints status to confirm.
 
-Default writes are **persistent** (written to the unit's flash).  Use
-`--temp` for testing — the temporary opcodes do not touch flash and
-revert on power cycle.
+### Examples
 
-Exit codes:
-- 0 : success
-- 1 : device not found / connection error
-- 2 : invalid arguments
-- 3 : HID write or read failure
+#### Read full status (the default action)
+
+```bash
+python3 tools/bodnar_cli.py
+```
+
+Sample output:
+
+```
+Bodnar LBE-1425  status:
+  locks:        GPS, PLL, ANT
+  raw status:   0x7f
+  output 1:     3.000000 MHz  [enabled, normal]
+  output 2:     2.500000 MHz  [enabled, normal]
+  FLL mode:     off (PLL mode -- recommended)
+
+GPS / NMEA  status (read from /dev/cu.usbmodem...):
+  fix:          3D fix
+  UTC:          2026-06-02  15:06:53.00 UTC
+  position:     +42.397813°N  -71.375297°E
+  altitude:     34.6 m
+  sats used:    12
+  sats in view: GP=12  GL=10
+  SNR:          GL med=33 dB,  GP med=28 dB
+  HDOP:         0.66
+```
+
+#### Read only HID status (skip CDC, faster)
+
+```bash
+python3 tools/bodnar_cli.py --no-gps
+```
+
+#### Machine-readable JSON
+
+```bash
+python3 tools/bodnar_cli.py --status --json
+```
+
+Returns one or two JSON objects on stdout (one per status block).
+
+#### Set output 1 to a WWV preset
+
+```bash
+python3 tools/bodnar_cli.py --out1 wwv10
+python3 tools/bodnar_cli.py --out1 10MHz       # equivalent
+python3 tools/bodnar_cli.py --out1 10000000    # equivalent (bare = Hz)
+```
+
+#### Set both outputs in one call (writes are persistent by default)
+
+```bash
+python3 tools/bodnar_cli.py --out1 10MHz --out2 24.000kHz
+```
+
+#### Set output 1 temporarily (does NOT write to flash)
+
+```bash
+python3 tools/bodnar_cli.py --out1 5MHz --temp
+```
+
+The unit reverts to its persistent value (last `--persist` write) on
+the next power cycle.  Use `--temp` for development and testing to
+avoid flash erase cycles.
+
+#### Quiet writes for shell scripts
+
+```bash
+python3 tools/bodnar_cli.py --out1 10MHz --quiet || echo "Bodnar write failed"
+```
+
+Exit codes (suitable for shell tests):
+- `0` : success
+- `1` : device not found / connection error
+- `2` : invalid argument (unparseable frequency, etc.)
+- `3` : HID write or read failure
+
+#### Raw HID status dump (protocol debugging only)
+
+```bash
+python3 tools/bodnar_cli.py --raw-status
+```
+
+Prints the full 60-byte HID status response in hex.  Useful only when
+verifying the protocol against a new unit or new firmware revision.
+The byte map is documented in `BODNAR_LBE1425_PROTOCOL.md`.
+
+### Frequency parsing
+
+The `--out1` / `--out2` arguments accept any of:
+
+| Format | Example | Hz value |
+|---|---|---|
+| Plain Hz | `10000000` | 10,000,000 |
+| Hz with unit | `10000000 Hz` | 10,000,000 |
+| kHz | `24.123kHz` or `24123Hz` | 24,123 |
+| MHz | `10MHz` or `10.5MHz` | 10,000,000 / 10,500,000 |
+| Scientific | `1.234e6` | 1,234,000 |
+| WWV preset | `wwv2.5`, `wwv5`, `wwv10`, `wwv15`, `wwv20`, `wwv25` | 2.5/5/10/15/20/25 MHz |
+| CHU preset | `chu3.33`, `chu7.85`, `chu14.67` | 3.33/7.85/14.67 MHz |
+| ISM preset | `ism` | 13.560 MHz |
+
+Note: this firmware revision accepts only **integer Hz** writes.  Any
+fractional Hz in your input is silently truncated by `int(hz)`.
+Practical precision is therefore 1 Hz; the underlying GPS-disciplined
+oscillator is much more stable than that.
+
+### Persistence
+
+Writes default to **persistent** mode (flash-backed; the LBE-1425's
+permanent set-frequency opcodes 0x06 / 0x0A).  The unit will reload
+the same frequencies on next power-up.
+
+Use `--temp` to use the temporary set-frequency opcodes (0x05 / 0x09)
+which take effect immediately but do not touch flash.  Recommended
+for any iterative or experimental work.
+
+### Common gotchas
+
+- **macOS dylib load error**: install hidapi via `brew install hidapi`.
+  The `pip install hid hidapi` Python wrappers don't bundle the native
+  library on macOS.
+- **"could not open port" or "device not found"**: another tool
+  (typically the official Bodnar app) is holding the device.  Quit it.
+- **GPS shows `(could not open CDC NMEA port)`**: same reason as
+  above, but for the CDC endpoint.  Either quit the conflicting app
+  or run `bodnar_cli.py --no-gps` to skip the CDC read.
+- **Persistent writes don't seem to stick across power cycles**:
+  confirm the unit is actually power-cycled (USB unplug + 10 s wait +
+  reconnect).  A `bodnar_cli.py --status` read straight after power-up
+  will tell you what's actually in flash.
